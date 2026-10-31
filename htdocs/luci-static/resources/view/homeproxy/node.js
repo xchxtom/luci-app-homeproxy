@@ -924,12 +924,6 @@ function renderNodeSettings(section, data, features, main_node, routing_mode, su
 	/* Transport config end */
 
 	/* Wireguard config start */
-	o = s.option(form.Flag, 'wireguard_gso', _('Generic segmentation offload'));
-	o.default = o.disabled;
-	o.depends('type', 'wireguard');
-	o.rmempty = false;
-	o.modalonly = true;
-
 	o = s.option(form.DynamicList, 'wireguard_local_address', _('Local address'),
 		_('List of IP (v4 or v6) addresses prefixes to be assigned to the interface.'));
 	o.datatype = 'cidr';
@@ -969,6 +963,14 @@ function renderNodeSettings(section, data, features, main_node, routing_mode, su
 	o.default = '1408';
 	o.depends('type', 'wireguard');
 	o.rmempty = false;
+	o.modalonly = true;
+
+	o = s.option(form.DynamicList, 'wireguard_allowed_ips', _('Allowed IPs'),
+		_('List of allowed IPs of the peer.<br/>' +
+		'Defaults to all addresses if empty.'));
+	o.datatype = 'cidr';
+	o.depends('type', 'wireguard');
+	o.rmempty = true;
 	o.modalonly = true;
 	/* Wireguard config end */
 
@@ -1528,6 +1530,9 @@ return view.extend({
 
 			if (subnodes.includes(uci.get(data[0], 'config', 'main_udp_node')))
 				uci.set(data[0], 'config', 'main_udp_node', 'nil');
+
+			/* Drop references to the nodes just removed */
+			hp.purgeInvalidNodeReferences(data[0]);
 
 			this.inputtitle = _('%s nodes removed').format(subnodes.length);
 			this.readonly = true;

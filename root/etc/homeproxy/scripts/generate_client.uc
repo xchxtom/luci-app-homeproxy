@@ -54,7 +54,7 @@ const dns_port = uci.get(uciconfig, uciinfra, 'dns_port') || '5333';
 
 let main_node, main_udp_node, dedicated_udp_node, default_outbound, sniff_override = '1',
     dns_server, dns_default_strategy, dns_default_server, dns_disable_cache, dns_disable_cache_expire,
-    dns_independent_cache, dns_client_subnet, direct_domain_list, proxy_domain_list;
+    dns_client_subnet, direct_domain_list, proxy_domain_list;
 
 if (routing_mode !== 'custom') {
 	main_node = uci.get(uciconfig, ucimain, 'main_node') || 'nil';
@@ -78,7 +78,6 @@ if (routing_mode !== 'custom') {
 	dns_default_server = uci.get(uciconfig, ucidnssetting, 'default_server');
 	dns_disable_cache = uci.get(uciconfig, ucidnssetting, 'disable_cache');
 	dns_disable_cache_expire = uci.get(uciconfig, ucidnssetting, 'disable_cache_expire');
-	dns_independent_cache = uci.get(uciconfig, ucidnssetting, 'independent_cache');
 	dns_client_subnet = uci.get(uciconfig, ucidnssetting, 'client_subnet');
 
 	/* Routing settings */
@@ -90,8 +89,7 @@ const proxy_mode = uci.get(uciconfig, ucimain, 'proxy_mode') || 'redirect_tproxy
       ipv6_support = uci.get(uciconfig, ucimain, 'ipv6_support') || '0',
       default_interface = uci.get(uciconfig, ucicontrol, 'bind_interface');
 
-const cache_file_store_rdrc = uci.get(uciconfig, uciexp, 'cache_file_store_rdrc'),
-      cache_file_rdrc_timeout = uci.get(uciconfig, uciexp, 'cache_file_rdrc_timeout');
+const cache_file_store_dns = uci.get(uciconfig, uciexp, 'cache_file_store_dns');
 
 const clash_api_enabled = uci.get(uciconfig, uciexp, 'clash_api_enabled'),
       nginx_support = uci.get(uciconfig, uciexp, 'nginx_support'),
@@ -102,7 +100,7 @@ const clash_api_enabled = uci.get(uciconfig, uciexp, 'clash_api_enabled'),
 
 const mixed_port = uci.get(uciconfig, uciinfra, 'mixed_port') || '5330';
 let self_mark, redirect_port, tproxy_port,
-    tun_name, tun_addr4, tun_addr6, tun_mtu, tun_gso,
+    tun_name, tun_addr4, tun_addr6, tun_mtu,
     tcpip_stack, endpoint_independent_nat, udp_timeout;
 udp_timeout = uci.get(uciconfig, 'infra', 'udp_timeout');
 if (routing_mode === 'custom')
@@ -111,18 +109,16 @@ if (match(proxy_mode, /redirect/)) {
 	self_mark = uci.get(uciconfig, 'infra', 'self_mark') || '100';
 	redirect_port = uci.get(uciconfig, 'infra', 'redirect_port') || '5331';
 }
-if (match(proxy_mode), /tproxy/)
+if (match(proxy_mode, /tproxy/))
 	if (main_udp_node !== 'nil' || routing_mode === 'custom')
 		tproxy_port = uci.get(uciconfig, 'infra', 'tproxy_port') || '5332';
-if (match(proxy_mode), /tun/) {
+if (match(proxy_mode, /tun/)) {
 	tun_name = uci.get(uciconfig, uciinfra, 'tun_name') || 'singtun0';
 	tun_addr4 = uci.get(uciconfig, uciinfra, 'tun_addr4') || '172.19.0.1/30';
 	tun_addr6 = uci.get(uciconfig, uciinfra, 'tun_addr6') || 'fdfe:dcba:9876::1/126';
 	tun_mtu = uci.get(uciconfig, uciinfra, 'tun_mtu') || '9000';
-	tun_gso = uci.get(uciconfig, uciinfra, 'tun_gso') || '0';
 	tcpip_stack = 'system';
 	if (routing_mode === 'custom') {
-		tun_gso = uci.get(uciconfig, uciroutingsetting, 'tun_gso') || '0';
 		tcpip_stack = uci.get(uciconfig, uciroutingsetting, 'tcpip_stack') || 'system';
 		endpoint_independent_nat = uci.get(uciconfig, uciroutingsetting, 'endpoint_independent_nat');
 	}
@@ -144,7 +140,11 @@ let subs_info = {};
 let checkedout_nodes = [],
     nodes_tobe_checkedout = [],
     checkedout_groups = [],
-    groups_tobe_checkedout = [];
+    groups_tobe_checkedout = [],
+    endpoints = [],
+    rcode_servers = {},
+    domain_resolvers = {},
+    direct_overrides = {};
 /* UCI config end */
 
 /* Config helper start */
@@ -170,6 +170,17 @@ function parse_dnsquery(strquery) {
 
 	return querys;
 
+}
+
+/*
+ * Check whether an outbound reference still points to an existing UCI node.
+ * Built-in tags (direct-out / block-out) are always available.
+ */
+function outbound_is_alive(tag) {
+	if (isEmpty(tag) || (tag in ['direct-out', 'block-out']))
+		return true;
+
+	return !isEmpty(uci.get_all(uciconfig, tag));
 }
 
 function get_tag(cfg, failback_tag, filterable) {
@@ -198,11 +209,56 @@ function get_tag(cfg, failback_tag, filterable) {
 		(failback_tag || null);
 }
 
-function generate_outbound(node) {
+/*
+ * WireGuard has been moved from an outbound to an endpoint in sing-box 1.11.0,
+ * and the legacy outbound is removed in sing-box 1.13.0.
+ */
+function generate_wireguard_endpoint(node, tag_override) {
+	let addresses = node.wireguard_local_address;
+	if (addresses && type(addresses) !== 'array')
+		addresses = [ addresses ];
+
+	let allowed_ips = node.wireguard_allowed_ips;
+	if (allowed_ips && type(allowed_ips) !== 'array')
+		allowed_ips = [ allowed_ips ];
+	if (isEmpty(allowed_ips))
+		allowed_ips = (ipv6_support === '1') ? [ '0.0.0.0/0', '::/0' ] : [ '0.0.0.0/0' ];
+
+	return {
+		type: 'wireguard',
+		tag: tag_override || get_tag(node, 'wg-' + node['.name'] + '-ep'),
+
+		system: true,
+		name: 'wg-' + node['.name'] + '-ep',
+		mtu: strToInt(node.wireguard_mtu) || 1408,
+		address: addresses,
+		private_key: node.wireguard_private_key,
+		peers: [
+			{
+				address: node.address,
+				port: strToInt(node.port),
+				public_key: node.wireguard_peer_public_key,
+				pre_shared_key: node.wireguard_pre_shared_key,
+				allowed_ips: allowed_ips,
+				reserved: parse_port(node.wireguard_reserved)
+			}
+		],
+
+		routing_mark: strToInt(self_mark),
+		tcp_fast_open: strToBool(node.tcp_fast_open)
+	};
+}
+
+function generate_outbound(node, tag_override) {
 	if (type(node) !== 'object' || isEmpty(node))
 		return null;
 
 	push(checkedout_nodes, node['.name']);
+
+	if (node.type === 'wireguard') {
+		push(endpoints, generate_wireguard_endpoint(node, tag_override));
+		return null;
+	}
 
 	if (node.type in ['selector', 'urltest']) {
 		let outbounds = [];
@@ -210,25 +266,44 @@ function generate_outbound(node) {
 			if (!isEmpty(grouphash)) {
 				const output = executeCommand(`/sbin/uci -q show ${shellQuote(uciconfig)} | /bin/grep "\.grouphash='*${shellQuote(grouphash)}'*" | /usr/bin/cut -f2 -d'.'`) || 	{};
 				if (!isEmpty(trim(output.stdout)))
-					for (let order in split(trim(output.stdout), /\n/))
-						push(outbounds, get_tag(order, 'cfg-' + order + '-out', { "filter_nodes": node.filter_nodes, "filter_keywords": node.filter_keywords }));
+					for (let order in split(trim(output.stdout), /\n/)) {
+						/* Skip members pointing to removed nodes */
+						if (!outbound_is_alive(order))
+							continue;
+
+						const tag = get_tag(order, 'cfg-' + order + '-out',
+							{ "filter_nodes": node.filter_nodes, "filter_keywords": node.filter_keywords });
+						/* Block is a rule action instead of an outbound since sing-box 1.11.0 */
+						if (tag !== 'block-out')
+							push(outbounds, tag);
+					}
 				if (!(grouphash in groups_tobe_checkedout))
 					push(groups_tobe_checkedout, grouphash);
 			}
 		}
 		for (let order in node.order) {
-			push(outbounds, get_tag(order, 'cfg-' + order + '-out', { "filter_nodes": node.filter_nodes, "filter_keywords": node.filter_keywords }));
+			/* Skip members pointing to removed nodes */
+			if (!outbound_is_alive(order))
+				continue;
+
+			const tag = get_tag(order, 'cfg-' + order + '-out',
+				{ "filter_nodes": node.filter_nodes, "filter_keywords": node.filter_keywords });
+			/* Block is a rule action instead of an outbound since sing-box 1.11.0 */
+			if (tag !== 'block-out')
+				push(outbounds, tag);
 			if (!(order in ['direct-out', 'block-out']) && !(order in nodes_tobe_checkedout))
 				push(nodes_tobe_checkedout, order);
 		}
+		/* Block is a rule action instead of an outbound since sing-box 1.11.0 */
 		if (length(outbounds) === 0)
-			push(outbounds, 'direct-out', 'block-out');
+			push(outbounds, 'direct-out');
 		return {
 			type: node.type,
-			tag: get_tag(node, 'cfg-' + node['.name'] + '-out'),
+			tag: tag_override || get_tag(node, 'cfg-' + node['.name'] + '-out'),
 			/* Selector */
 			outbounds: outbounds,
-			default: node.default_selected ? (get_tag(node.default_selected, 'cfg-' + node.default_selected + '-out')) : null,
+			default: (outbound_is_alive(node.default_selected) && node.default_selected !== 'block-out') ?
+				(node.default_selected ? (get_tag(node.default_selected, 'cfg-' + node.default_selected + '-out')) : null) : null,
 			/* URLTest */
 			url: node.test_url,
 			interval: node.interval,
@@ -240,7 +315,7 @@ function generate_outbound(node) {
 
 	const outbound = {
 		type: node.type,
-		tag: get_tag(node, 'cfg-' + node['.name'] + '-out'),
+		tag: tag_override || get_tag(node, 'cfg-' + node['.name'] + '-out'),
 		routing_mark: strToInt(self_mark),
 
 		server: node.address,
@@ -251,8 +326,6 @@ function generate_outbound(node) {
 		password: node.password,
 
 		/* Direct */
-		override_address: node.override_address,
-		override_port: strToInt(node.override_port),
 		proxy_protocol: (node.proxy_protocol === '1') ? {
 			enabled: true,
 			version: strToInt(node.proxy_protocol_version)
@@ -295,16 +368,6 @@ function generate_outbound(node) {
 		global_padding: node.vmess_global_padding ? (node.vmess_global_padding === '1') : null,
 		authenticated_length: node.vmess_authenticated_length ? (node.vmess_authenticated_length === '1') : null,
 		packet_encoding: node.packet_encoding,
-		/* WireGuard */
-		system_interface: (node.type === 'wireguard') || null,
-		gso: (node.wireguard_gso === '1') || null,
-		interface_name: (node.type === 'wireguard') ? 'wg-' + node['.name'] + '-out' : null,
-		local_address: node.wireguard_local_address,
-		private_key: node.wireguard_private_key,
-		peer_public_key: node.wireguard_peer_public_key,
-		pre_shared_key: node.wireguard_pre_shared_key,
-		reserved: parse_port(node.wireguard_reserved),
-		mtu: strToInt(node.wireguard_mtu),
 
 		multiplex: (node.multiplex === '1') ? {
 			enabled: true,
@@ -328,10 +391,9 @@ function generate_outbound(node) {
 			max_version: node.tls_max_version,
 			cipher_suites: node.tls_cipher_suites,
 			certificate_path: node.tls_cert_path,
+			/* Legacy ECH fields were removed in sing-box 1.13.0 */
 			ech: (node.tls_ech === '1') ? {
 				enabled: true,
-				dynamic_record_sizing_disabled: (node.tls_ech_tls_disable_drs === '1'),
-				pq_signature_schemes_enabled: (node.tls_ech_enable_pqss === '1'),
 				config: node.tls_ech_config
 			} : null,
 			utls: !isEmpty(node.tls_utls) ? {
@@ -368,6 +430,16 @@ function generate_outbound(node) {
 		udp_fragment: strToBool(node.udp_fragment)
 	};
 
+	/*
+	 * Destination override fields are route options instead of direct outbound
+	 * fields since sing-box 1.11.0.
+	 */
+	if (node.type === 'direct' && (!isEmpty(node.override_address) || !isEmpty(node.override_port)))
+		direct_overrides[outbound.tag] = {
+			override_address: node.override_address,
+			override_port: strToInt(node.override_port)
+		};
+
 	return outbound;
 }
 
@@ -380,8 +452,12 @@ function get_outbound(cfg) {
 			return 'any';
 
 		let outbounds = [];
-		for (let i in cfg)
-			push(outbounds, get_outbound(i));
+		for (let i in cfg) {
+			const outbound = get_outbound(i);
+			/* Block is a rule action instead of an outbound since sing-box 1.11.0 */
+			if (outbound !== 'block-out')
+				push(outbounds, outbound);
+		}
 		return outbounds;
 	} else {
 		if (cfg in ['direct-out', 'block-out']) {
@@ -415,6 +491,44 @@ function get_ruleset(cfg) {
 		push(rules, isEmpty(i) ? null : 'cfg-' + i + '-rule');
 	return rules;
 }
+
+/*
+ * `block` is a rule action instead of an outbound since sing-box 1.11.0,
+ * so it can no longer be used as a detour.
+ */
+function get_detour(cfg) {
+	const outbound = get_outbound(cfg);
+	if (type(outbound) === 'array') {
+		let outbounds = [];
+		for (let i in outbound)
+			if (i !== 'block-out')
+				push(outbounds, i);
+
+		return length(outbounds) ? outbounds : null;
+	}
+
+	return (outbound !== 'block-out') ? outbound : null;
+}
+
+/* `block` is a rule action instead of an outbound since sing-box 1.11.0 */
+function get_route_action(outbound) {
+	if (type(outbound) === 'array') {
+		let outbounds = [];
+		for (let i in outbound)
+			if (i !== 'block-out')
+				push(outbounds, i);
+
+		if (length(outbounds) === 0)
+			return { action: 'reject' };
+
+		return { action: 'route', outbound: outbounds };
+	}
+
+	if (outbound === 'block-out')
+		return { action: 'reject' };
+
+	return { action: 'route', outbound: outbound };
+}
 /* Config helper end */
 
 const config = {};
@@ -427,30 +541,145 @@ config.log = {
 	timestamp: true
 };
 
+/*
+ * Legacy DNS server addresses (`address` strings) are removed in sing-box
+ * 1.14.0, translate them into the new type based format.
+ */
+function parse_dnsaddress(address) {
+	if (isEmpty(address))
+		return null;
+
+	const url = parseURL(address);
+	/* A bare IP or host name: plain UDP DNS */
+	if (!url)
+		return { type: 'udp', server: address };
+
+	switch (url.protocol) {
+	case 'local':
+	case 'fakeip':
+		return { type: url.protocol };
+
+	case 'dhcp':
+		return (url.hostname === 'auto') ? { type: 'dhcp' } :
+			{ type: 'dhcp', interface: url.hostname };
+
+	case 'tcp':
+	case 'udp':
+	case 'tls':
+	case 'quic':
+		return {
+			type: url.protocol,
+			server: url.hostname,
+			server_port: strToInt(url.port)
+		};
+
+	case 'https':
+	case 'h3':
+		return {
+			type: url.protocol,
+			server: url.hostname,
+			server_port: strToInt(url.port),
+			path: (url.pathname && url.pathname !== '/') ? url.pathname : null
+		};
+
+	default:
+		return { type: 'udp', server: address };
+	}
+}
+
+/*
+ * `rcode://` DNS servers are removed in sing-box 1.14.0, they are replaced by the
+ * `predefined` DNS rule action.
+ */
+const rcode_map = {
+	success: 'NOERROR',
+	format_error: 'FORMERR',
+	server_failure: 'SERVFAIL',
+	name_error: 'NXDOMAIN',
+	not_implemented: 'NOTIMP',
+	refused: 'REFUSED'
+};
+
+function parse_dnsrcode(address) {
+	if (isEmpty(address))
+		return null;
+
+	if (address === 'block-dns')
+		return 'NXDOMAIN';
+
+	const rcode = match(address, /^rcode:\/\/(.*)$/);
+	return rcode ? (rcode_map[rcode[1]] || 'NXDOMAIN') : null;
+}
+
+/* `server` is a part of the DNS rule action since sing-box 1.11.0 */
+function get_dns_action(server) {
+	const rcode = parse_dnsrcode(server) || rcode_servers[get_resolver(server)];
+	if (rcode)
+		return { action: 'predefined', rcode: rcode };
+
+	return { action: 'route', server: get_resolver(server) };
+}
+
+/*
+ * Match conditions of a custom DNS rule. Shared by the `evaluate` rule and the
+ * following response matching rule.
+ */
+function get_dns_conds(cfg) {
+	return {
+		ip_version: strToInt(cfg.ip_version),
+		query_type: parse_dnsquery(cfg.query_type),
+		network: cfg.network,
+		protocol: cfg.protocol,
+		domain: cfg.domain,
+		domain_suffix: cfg.domain_suffix,
+		domain_keyword: cfg.domain_keyword,
+		domain_regex: cfg.domain_regex,
+		port: parse_port(cfg.port),
+		port_range: cfg.port_range,
+		source_ip_cidr: cfg.source_ip_cidr,
+		source_ip_is_private: (cfg.source_ip_is_private === '1') || null,
+		source_port: parse_port(cfg.source_port),
+		source_port_range: cfg.source_port_range,
+		process_name: cfg.process_name,
+		process_path: cfg.process_path,
+		user: cfg.user,
+		clash_mode: cfg.clash_mode,
+		invert: (cfg.invert === '1') || null
+	};
+}
+
+/* Legacy outbound DNS rule items are removed in sing-box 1.14.0 */
+function get_domain_resolver(resolver, strategy) {
+	const server = get_resolver(resolver);
+	if (isEmpty(server) && isEmpty(strategy))
+		return null;
+
+	return {
+		server: server,
+		strategy: strategy
+	};
+}
+
 /* DNS start */
 /* Default settings */
 config.dns = {
 	servers: [
 		{
+			type: 'udp',
 			tag: 'default-dns',
-			address: wan_dns,
+			server: wan_dns,
 			detour: 'direct-out'
 		},
 		{
+			type: 'local',
 			tag: 'system-dns',
-			address: 'local',
 			detour: 'direct-out'
-		},
-		{
-			tag: 'block-dns',
-			address: 'rcode://name_error'
 		}
 	],
 	rules: [],
 	strategy: dns_default_strategy,
 	disable_cache: (dns_disable_cache === '1'),
 	disable_expire: (dns_disable_cache_expire === '1'),
-	independent_cache: (dns_independent_cache === '1'),
 	client_subnet: dns_client_subnet
 };
 
@@ -460,6 +689,7 @@ if (!isEmpty(main_node)) {
 	if (validateHostname(main_node_addr))
 		push(config.dns.rules, {
 			domain: main_node_addr,
+			action: 'route',
 			server: 'default-dns'
 		});
 
@@ -468,6 +698,7 @@ if (!isEmpty(main_node)) {
 		if (validateHostname(main_udp_node_addr))
 			push(config.dns.rules, {
 				domain: main_udp_node_addr,
+				action: 'route',
 				server: 'default-dns'
 			});
 	}
@@ -475,6 +706,7 @@ if (!isEmpty(main_node)) {
 	if (direct_domain_list)
 		push(config.dns.rules, {
 			domain_keyword: direct_domain_list,
+			action: 'route',
 			server: 'default-dns'
 		});
 
@@ -483,7 +715,8 @@ if (!isEmpty(main_node)) {
 		push(config.dns.rules, {
 			domain_keyword: (routing_mode !== 'gfwlist') ? proxy_domain_list : null,
 			query_type: [64, 65],
-			server: 'block-dns'
+			action: 'predefined',
+			rcode: 'NXDOMAIN'
 		});
 
 	if (isEmpty(config.dns.rules))
@@ -492,11 +725,15 @@ if (!isEmpty(main_node)) {
 	let default_final_dns = 'default-dns';
 	/* Main DNS */
 	if (dns_server !== wan_dns) {
+		const main_dns = parse_dnsaddress('tcp://' + (validation('ip6addr', dns_server) ? `[${dns_server}]` : dns_server));
 		push(config.dns.servers, {
+			type: main_dns.type,
 			tag: 'main-dns',
-			address: 'tcp://' + (validation('ip6addr', dns_server) ? `[${dns_server}]` : dns_server),
-			strategy: (ipv6_support !== '1') ? 'ipv4_only' : null,
-			detour: 'main-out'
+			server: main_dns.server,
+			server_port: main_dns.server_port,
+			detour: 'main-out',
+			/* Legacy DNS server `strategy` is replaced by the domain resolver */
+			domain_resolver: get_domain_resolver('default-dns', (ipv6_support !== '1') ? 'ipv4_only' : null)
 		});
 
 		default_final_dns = 'main-dns';
@@ -509,54 +746,139 @@ if (!isEmpty(main_node)) {
 		if (cfg.enabled !== '1')
 			return;
 
+		const tag = 'cfg-' + cfg['.name'] + '-dns';
+
+		const rcode = parse_dnsrcode(cfg.address);
+		if (rcode) {
+			rcode_servers[tag] = rcode;
+			return;
+		}
+
+		const server = parse_dnsaddress(cfg.address);
+		if (isEmpty(server))
+			return;
+
 		push(config.dns.servers, {
-			tag: 'cfg-' + cfg['.name'] + '-dns',
-			address: cfg.address,
-			address: cfg.address,
-			address_resolver: get_resolver(cfg.address_resolver),
-			address_strategy: cfg.address_strategy,
-			strategy: cfg.resolve_strategy,
-			detour: get_outbound(cfg.outbound),
+			type: server.type,
+			tag: tag,
+			server: server.server,
+			server_port: server.server_port,
+			path: server.path,
+			interface: server.interface,
+			detour: get_detour(cfg.outbound),
+			/*
+			 * address_resolver / address_strategy and the legacy server
+			 * strategy option are replaced by domain_resolver.
+			 */
+			domain_resolver: get_domain_resolver(cfg.address_resolver, cfg.address_strategy || cfg.resolve_strategy),
 			client_subnet: cfg.client_subnet
 		});
 	});
 
 	/* DNS rules */
+	let dns_rules = [];
 	uci.foreach(uciconfig, ucidnsrule, (cfg) => {
-		if (cfg.enabled !== '1')
-			return;
+		if (cfg.enabled === '1')
+			push(dns_rules, cfg);
+	});
+
+	/*
+	 * Legacy address filter fields (`ip_cidr` / `ip_is_private` without
+	 * `match_response`) are rejected at startup as soon as any DNS rule
+	 * uses `ip_version`, `query_type`, `evaluate` or `match_response`.
+	 * The check is global, so migrate every affected rule at once.
+	 */
+	let resp_match = (routing_mode === 'gfwlist') || !isEmpty(proxy_domain_list);
+	for (let cfg in dns_rules)
+		if ((cfg.match_response === '1') || !isEmpty(cfg.ip_version) || !isEmpty(cfg.query_type))
+			resp_match = true;
+
+	for (let cfg in dns_rules) {
+		const action = get_dns_action(cfg.server),
+		      conds = get_dns_conds(cfg),
+		      has_filter = !isEmpty(cfg.ip_cidr) || (cfg.ip_is_private === '1');
+
+		/*
+		 * Query the target server up front with the `evaluate` action and
+		 * match the address filter fields against its response instead.
+		 *
+		 * `evaluate` needs a real DNS server, so predefined responses can
+		 * not be filtered by address and the fields are dropped instead.
+		 */
+		const match_response = (action.action === 'route') &&
+			((cfg.match_response === '1') || (has_filter && resp_match)),
+		      drop_filter = (has_filter && resp_match && action.action !== 'route');
+
+		if (match_response)
+			push(config.dns.rules, {
+				ip_version: conds.ip_version,
+				query_type: conds.query_type,
+				network: conds.network,
+				protocol: conds.protocol,
+				domain: conds.domain,
+				domain_suffix: conds.domain_suffix,
+				domain_keyword: conds.domain_keyword,
+				domain_regex: conds.domain_regex,
+				port: conds.port,
+				port_range: conds.port_range,
+				source_ip_cidr: conds.source_ip_cidr,
+				source_ip_is_private: conds.source_ip_is_private,
+				source_port: conds.source_port,
+				source_port_range: conds.source_port_range,
+				process_name: conds.process_name,
+				process_path: conds.process_path,
+				user: conds.user,
+				clash_mode: conds.clash_mode,
+				rule_set: get_ruleset(cfg.rule_set),
+				rule_set_ip_cidr_match_source: (cfg.rule_set_ipcidr_match_source === '1') || null,
+				invert: conds.invert,
+				action: 'evaluate',
+				server: action.server
+			});
 
 		push(config.dns.rules, {
-			ip_version: strToInt(cfg.ip_version),
-			query_type: parse_dnsquery(cfg.query_type),
-			network: cfg.network,
-			protocol: cfg.protocol,
-			domain: cfg.domain,
-			domain_suffix: cfg.domain_suffix,
-			domain_keyword: cfg.domain_keyword,
-			domain_regex: cfg.domain_regex,
-			port: parse_port(cfg.port),
-			port_range: cfg.port_range,
-			source_ip_cidr: cfg.source_ip_cidr,
-			source_ip_is_private: (cfg.source_ip_is_private === '1') || null,
-			ip_cidr: cfg.ip_cidr,
-			ip_is_private: (cfg.ip_is_private === '1') || null,
-			source_port: parse_port(cfg.source_port),
-			source_port_range: cfg.source_port_range,
-			process_name: cfg.process_name,
-			process_path: cfg.process_path,
-			user: cfg.user,
-			clash_mode: cfg.clash_mode,
+			ip_version: conds.ip_version,
+			query_type: conds.query_type,
+			network: conds.network,
+			protocol: conds.protocol,
+			domain: conds.domain,
+			domain_suffix: conds.domain_suffix,
+			domain_keyword: conds.domain_keyword,
+			domain_regex: conds.domain_regex,
+			port: conds.port,
+			port_range: conds.port_range,
+			source_ip_cidr: conds.source_ip_cidr,
+			source_ip_is_private: conds.source_ip_is_private,
+			source_port: conds.source_port,
+			source_port_range: conds.source_port_range,
+			process_name: conds.process_name,
+			process_path: conds.process_path,
+			user: conds.user,
+			clash_mode: conds.clash_mode,
 			rule_set: get_ruleset(cfg.rule_set),
-			rule_set_ipcidr_match_source: (cfg.rule_set_ipcidr_match_source === '1') || null,
-			invert: (cfg.invert === '1') || null,
-			outbound: get_outbound(cfg.outbound),
-			server: get_resolver(cfg.server),
+			rule_set_ip_cidr_match_source: (cfg.rule_set_ipcidr_match_source === '1') || null,
+			invert: conds.invert,
+			match_response: match_response || null,
+			ip_cidr: drop_filter ? null : cfg.ip_cidr,
+			ip_is_private: drop_filter ? null : ((cfg.ip_is_private === '1') || null),
+			action: action.action,
+			server: action.server,
+			rcode: action.rcode,
 			disable_cache: (cfg.dns_disable_cache === '1') || null,
 			rewrite_ttl: strToInt(cfg.rewrite_ttl),
 			client_subnet: cfg.client_subnet
 		});
-	});
+
+		/* Outbound DNS rule items are removed in sing-box 1.14.0 */
+		const detour = get_detour(cfg.outbound);
+		if (!isEmpty(detour) && type(detour) === 'string' && action.action === 'route')
+			domain_resolvers[detour] = {
+				server: action.server,
+				disable_cache: (cfg.dns_disable_cache === '1') || null,
+				rewrite_ttl: strToInt(cfg.rewrite_ttl),
+				client_subnet: cfg.client_subnet
+			};
+	}
 
 	if (isEmpty(config.dns.rules))
 		config.dns.rules = null;
@@ -581,8 +903,6 @@ push(config.inbounds, {
 	listen: '::',
 	listen_port: int(mixed_port),
 	udp_timeout: udp_timeout ? (udp_timeout + 's') : null,
-	sniff: true,
-	sniff_override_destination: (sniff_override === '1'),
 	set_system_proxy: false
 });
 
@@ -592,9 +912,7 @@ if (match(proxy_mode, /redirect/))
 		tag: 'redirect-in',
 
 		listen: '::',
-		listen_port: int(redirect_port),
-		sniff: true,
-		sniff_override_destination: (sniff_override === '1')
+		listen_port: int(redirect_port)
 	});
 if (match(proxy_mode, /tproxy/))
 	push(config.inbounds, {
@@ -604,27 +922,36 @@ if (match(proxy_mode, /tproxy/))
 		listen: '::',
 		listen_port: int(tproxy_port),
 		network: 'udp',
-		udp_timeout: udp_timeout ? (udp_timeout + 's') : null,
-		sniff: true,
-		sniff_override_destination: (sniff_override === '1')
+		udp_timeout: udp_timeout ? (udp_timeout + 's') : null
 	});
-if (match(proxy_mode, /tun/))
+if (match(proxy_mode, /tun/)) {
+	let tun_addr = [ tun_addr4 ];
+	if (ipv6_support === '1')
+		push(tun_addr, tun_addr6);
+
 	push(config.inbounds, {
 		type: 'tun',
 		tag: 'tun-in',
 
 		interface_name: tun_name,
-		inet4_address: tun_addr4,
-		inet6_address: (ipv6_support === '1') ? tun_addr6 : null,
+		/* inet4_address / inet6_address are merged into address since sing-box 1.10.0 */
+		address: tun_addr,
 		mtu: strToInt(tun_mtu),
-		gso: (tun_gso === '1'),
 		auto_route: false,
-		endpoint_independent_nat: strToBool(endpoint_independent_nat),
 		udp_timeout: udp_timeout ? (udp_timeout + 's') : null,
-		stack: tcpip_stack,
-		sniff: true,
-		sniff_override_destination: (sniff_override === '1'),
+		stack: tcpip_stack
 	});
+
+	/*
+	 * endpoint_independent_nat becomes a no-op in sing-box 1.11.0 and is
+	 * superseded by the UDP NAT fields in sing-box 1.14.0.
+	 */
+	if (endpoint_independent_nat === '0') {
+		const tun_in = config.inbounds[length(config.inbounds) - 1];
+		tun_in.udp_mapping = 'address_and_port_dependent';
+		tun_in.udp_filtering = 'address_and_port_dependent';
+	}
+}
 /* Inbound end */
 
 /* Outbound start */
@@ -634,41 +961,54 @@ config.outbounds = [
 		type: 'direct',
 		tag: 'direct-out',
 		routing_mark: strToInt(self_mark)
-	},
-	{
-		type: 'block',
-		tag: 'block-out'
-	},
-	{
-		type: 'dns',
-		tag: 'dns-out'
 	}
 ];
 
 /* Main outbounds */
 if (!isEmpty(main_node)) {
+	if (!outbound_is_alive(main_node))
+		die(sprintf('Main node %s is missing, please re-select a node.', main_node));
+
 	const main_node_cfg = uci.get_all(uciconfig, main_node) || {};
-	push(config.outbounds, generate_outbound(main_node_cfg));
-	config.outbounds[length(config.outbounds)-1].tag = 'main-out';
+	/* generate_outbound() returns null for endpoints (e.g. WireGuard) */
+	const main_outbound = generate_outbound(main_node_cfg, 'main-out');
+	if (main_outbound)
+		push(config.outbounds, main_outbound);
 
 	if (dedicated_udp_node) {
+		if (!outbound_is_alive(main_udp_node))
+			die(sprintf('Main UDP node %s is missing, please re-select a node.', main_udp_node));
+
 		const main_udp_node_cfg = uci.get_all(uciconfig, main_udp_node) || {};
-		push(config.outbounds, generate_outbound(main_udp_node_cfg));
-		config.outbounds[length(config.outbounds)-1].tag = 'main-udp-out';
+		const main_udp_outbound = generate_outbound(main_udp_node_cfg, 'main-udp-out');
+		if (main_udp_outbound)
+			push(config.outbounds, main_udp_outbound);
 	}
 } else if (!isEmpty(default_outbound))
 	uci.foreach(uciconfig, uciroutingnode, (cfg) => {
 		if (cfg.enabled !== '1')
 			return;
 
-		const outbound = uci.get_all(uciconfig, cfg.node) || {};
-		push(config.outbounds, generate_outbound(outbound));
-		const type = config.outbounds[length(config.outbounds)-1].type;
-		if (!(type in ['selector', 'urltest'])) {
-			config.outbounds[length(config.outbounds)-1].domain_strategy = cfg.domain_strategy;
-			config.outbounds[length(config.outbounds)-1].bind_interface = cfg.bind_interface;
-			config.outbounds[length(config.outbounds)-1].detour = get_outbound(cfg.outbound);
+		if (!outbound_is_alive(cfg.node))
+			die(sprintf('%s\'s node is missing, please check your configuration.', cfg.label || cfg['.name']));
+
+		const node = uci.get_all(uciconfig, cfg.node) || {};
+		const outbound = generate_outbound(node);
+
+		if (outbound && !(outbound.type in ['selector', 'urltest'])) {
+			/*
+			 * The outbound `domain_strategy` is replaced by the domain
+			 * resolver since sing-box 1.12.0.
+			*/
+			outbound.domain_resolver = domain_resolvers[outbound.tag] ||
+				get_domain_resolver('', cfg.domain_strategy);
+			outbound.bind_interface = cfg.bind_interface;
+			outbound.detour = get_detour(cfg.outbound);
 		}
+
+		/* generate_outbound() returns null for endpoints (e.g. WireGuard) */
+		if (outbound)
+			push(config.outbounds, outbound);
 	});
 /* Second level outbounds */
 while (length(nodes_tobe_checkedout) > 0) {
@@ -677,9 +1017,15 @@ while (length(nodes_tobe_checkedout) > 0) {
 	nodes_tobe_checkedout = [];
 	map(oldarr, (k) => {
 		if (!(k in checkedout_nodes)) {
-			const outbound = uci.get_all(uciconfig, k) || {};
-			push(config.outbounds, generate_outbound(outbound));
 			push(checkedout_nodes, k);
+
+			const outbound = uci.get_all(uciconfig, k) || {};
+			/* Skip nodes that have been removed */
+			if (!isEmpty(outbound)) {
+				const generated = generate_outbound(outbound);
+				if (generated)
+					push(config.outbounds, generated);
+			}
 		}
 	});
 }
@@ -707,20 +1053,23 @@ while (length(groups_tobe_checkedout) > 0) {
 /* Routing rules start */
 /* Default settings */
 config.route = {
-	rules: [
-		{
-			inbound: 'dns-in',
-			outbound: 'dns-out'
-		},
-		{
-			protocol: 'dns',
-			outbound: 'dns-out'
-		}
-	],
+	rules: [],
 	rule_set: [],
 	auto_detect_interface: isEmpty(default_interface) ? true : null,
 	default_interface: default_interface
 };
+
+/*
+ * Sniffing is a rule action instead of an inbound field since sing-box 1.11.0.
+ * The DNS inbound is always sniffed so that queries can be hijacked below.
+ */
+if (sniff_override === '1')
+	push(config.route.rules, { action: 'sniff' });
+else
+	push(config.route.rules, { inbound: 'dns-in', action: 'sniff' });
+
+/* The special dns outbound is replaced by the hijack-dns rule action */
+push(config.route.rules, { protocol: 'dns', action: 'hijack-dns' });
 
 /* Routing rules */
 if (!isEmpty(main_node)) {
@@ -728,6 +1077,7 @@ if (!isEmpty(main_node)) {
 	if (length(direct_domain_list))
 		push(config.route.rules, {
 			domain_keyword: direct_domain_list,
+			action: 'route',
 			outbound: 'direct-out'
 		});
 
@@ -735,6 +1085,7 @@ if (!isEmpty(main_node)) {
 	if (dedicated_udp_node)
 		push(config.route.rules, {
 			network: 'udp',
+			action: 'route',
 			outbound: 'main-udp-out'
 		});
 
@@ -744,7 +1095,8 @@ if (!isEmpty(main_node)) {
 		if (cfg.enabled !== '1')
 			return null;
 
-		push(config.route.rules, {
+		const outbound = get_outbound(cfg.outbound);
+		let rule = {
 			ip_version: strToInt(cfg.ip_version),
 			protocol: cfg.protocol,
 			network: cfg.network,
@@ -765,13 +1117,55 @@ if (!isEmpty(main_node)) {
 			user: cfg.user,
 			clash_mode: cfg.clash_mode,
 			rule_set: get_ruleset(cfg.rule_set),
-			rule_set_ipcidr_match_source: (cfg.rule_set_ipcidr_match_source === '1') || null,
-			invert: (cfg.invert === '1') || null,
-			outbound: get_outbound(cfg.outbound)
-		});
+			rule_set_ip_cidr_match_source: (cfg.rule_set_ipcidr_match_source === '1') || null,
+			invert: (cfg.invert === '1') || null
+		};
+
+		/* `block` is a rule action instead of an outbound since sing-box 1.11.0 */
+		const action = get_route_action(outbound);
+		for (let k in keys(action))
+			rule[k] = action[k];
+
+		/*
+		 * Destination override fields of the direct outbound are route
+		 * options since sing-box 1.11.0.
+		 */
+		if (action.action === 'route' && type(outbound) === 'string') {
+			const options = direct_overrides[outbound];
+			if (options) {
+				rule.override_address = options.override_address;
+				rule.override_port = options.override_port;
+			}
+		}
+
+		push(config.route.rules, rule);
 	});
 
-	config.route.final = get_outbound(default_outbound);
+	const final_outbound = get_outbound(default_outbound);
+	if (final_outbound === 'block-out') {
+		/*
+		 * The special block outbound is replaced by the reject rule action; it is
+		 * a non-final catch-all rule, so `final` is only a fallback that is never
+		 * reached.
+		 */
+		push(config.route.rules, { action: 'reject' });
+		config.route.final = 'direct-out';
+	} else {
+		config.route.final = final_outbound;
+
+		/*
+		 * `route-options` is a non-final action, so a trailing rule is only
+		 * reached by connections falling through to `final`, which is exactly the
+		 * scope of the legacy direct outbound destination override.
+		 */
+		const options = direct_overrides[final_outbound];
+		if (options)
+			push(config.route.rules, {
+				action: 'route-options',
+				override_address: options.override_address,
+				override_port: options.override_port
+			});
+	}
 };
 
 /* Rule set */
@@ -786,7 +1180,7 @@ if (routing_mode === 'custom') {
 			format: cfg.format,
 			path: cfg.path,
 			url: cfg.url,
-			download_detour: get_outbound(cfg.outbound),
+			download_detour: get_detour(cfg.outbound),
 			update_interval: cfg.update_interval
 		});
 	});
@@ -799,8 +1193,7 @@ if (routing_mode === 'custom') {
 		cache_file: {
 			enabled: true,
 			path: HP_DIR + '/cache.db',
-			store_rdrc: (cache_file_store_rdrc === '1') || null,
-			rdrc_timeout: cache_file_rdrc_timeout
+			store_dns: (cache_file_store_dns === '1') || null
 		}
 	};
 	/* Clash API */
@@ -817,6 +1210,10 @@ if (routing_mode === 'custom') {
 	};
 }
 /* Experimental end */
+
+/* Endpoints (e.g. WireGuard) collected by generate_outbound() */
+if (length(endpoints) > 0)
+	config.endpoints = endpoints;
 
 system('mkdir -p ' + RUN_DIR);
 writefile(RUN_DIR + '/sing-box-c.json', sprintf('%.J\n', removeBlankAttrs(config)));
