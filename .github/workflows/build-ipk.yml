@@ -47,16 +47,38 @@ jobs:
           RELEASE_TYPE: ${{ github.event_name }}
         run: |
           pushd .github
+
           fakeroot bash build-ipk.sh
-          echo "ASSET_NAME=$(ls *.ipk)" >> $GITHUB_ENV
+
+          echo "===== Search generated IPK ====="
+          find . -type f -name "*.ipk" -print
+
+          # 将临时目录中的 IPK 收集到 .github 根目录
+          find . -mindepth 2 -type f -name "*.ipk" \
+            -exec cp -f {} . \;
+
+          # 检查最终产物
+          IPK_FILE=$(find . -maxdepth 1 -type f -name "*.ipk" -print -quit)
+
+          if [ -z "$IPK_FILE" ]; then
+            echo "ERROR: IPK file not found!"
+            exit 1
+          fi
+
+          echo "ASSET_NAME=$(basename "$IPK_FILE")" >> "$GITHUB_ENV"
+
+          ls -lh "$IPK_FILE"
+
           popd
 
-      - name: Publishing to GitHub Artifacts
+       - name: Publishing to GitHub Artifacts
         uses: actions/upload-artifact@v4
         if: github.event_name != 'release'
         with:
           name: ${{ env.ASSET_NAME }}
-          path: .github/*.ipk
+          path: .github/${{ env.ASSET_NAME }}
+          if-no-files-found: error
+          compression-level: 0
 
       - name: Publishing to GitHub Releases
         uses: svenstaro/upload-release-action@v2
