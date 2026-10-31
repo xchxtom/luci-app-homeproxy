@@ -34,6 +34,9 @@ on:
 
   workflow_dispatch:
 
+# GitHub Actions 权限
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -80,11 +83,32 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-      - name: Publishing to GitHub Releases
-        uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
+      - name: Collect IPK
+        run: |
+          find .github -type f -name "*.ipk" -print
+
+          IPK_FILE=$(find .github -type f -name "*.ipk" -print -quit)
+
+          if [ -z "$IPK_FILE" ]; then
+            echo "ERROR: IPK file not found"
+            exit 1
+          fi
+
+          mkdir -p release
+          cp "$IPK_FILE" release/
+
+          echo "IPK_FILE=$(basename "$IPK_FILE")" >> $GITHUB_ENV
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: ${{ github.token }}
-          file: .github/*.ipk
-          tag: ${{ github.ref }}
-          file_glob: true
+          tag_name: latest
+          name: HomeProxy Latest Build
+          body: |
+            Automated build from master-1.
+            Commit: ${{ github.sha }}
+          files: release/*.ipk
+          make_latest: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
