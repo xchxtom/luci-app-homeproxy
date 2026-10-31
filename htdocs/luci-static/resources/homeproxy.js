@@ -236,6 +236,96 @@ return baseclass.extend({
 		return nodelist;
 	},
 
+	/*
+	 * Purge references pointing to nodes/sections which no longer exist.
+	 *
+	 * The "Outbounds" list of a selector/urltest node (node collection) and
+	 * the routing nodes may refer to nodes that have just been removed from
+	 * a subscription. Keeping those references makes the generated sing-box
+	 * config point to non-existing outbounds, so homeproxy fails to start.
+	 *
+	 * Returns the amount of cleaned up references.
+	 */
+	purgeInvalidNodeReferences: function(uciconfig) {
+		var specials = [ 'direct-out', 'block-out', 'nil', 'same' ],
+		    purged = 0;
+
+		var alive = function(sid) {
+			if (!sid || specials.includes(sid))
+				return true;
+			return (uci.get(uciconfig, sid) != null);
+		};
+
+		var filter_option = function(sid, option, validator) {
+			var value = uci.get(uciconfig, sid, option);
+			if (value == null)
+				return false;
+
+			var list = Array.isArray(value) ? value : [ value ],
+			    kept = list.filter(validator);
+
+			if (kept.length === list.length)
+				return false;
+
+			if (kept.length)
+				uci.set(uciconfig, sid, option, kept);
+			else
+				uci.unset(uciconfig, sid, option);
+
+			return true;
+		};
+
+		/* Node collections: selector / urltest nodes */
+		uci.sections(uciconfig, 'node', function(res) {
+			if (![ 'selector', 'urltest' ].includes(res.type))
+				return;
+
+			if (filter_option(res['.name'], 'order', alive))
+				purged++;
+
+			var defnode = uci.get(uciconfig, res['.name'], 'default_selected');
+			if (defnode && !alive(defnode)) {
+				uci.unset(uciconfig, res['.name'], 'default_selected');
+				purged++;
+			}
+		});
+
+		/* Routing nodes which lost their outbound node */
+		var dead = [];
+		uci.sections(uciconfig, 'routing_node', function(res) {
+			var node = uci.get(uciconfig, res['.name'], 'node');
+			if (node && !alive(node))
+				dead.push(res);
+		});
+
+		if (dead.length) {
+			var deadnames = dead.map(function(res) { return res['.name']; }),
+			    survives = function(sid) { return !deadnames.includes(sid); };
+
+			/* Detour / outbound references to the routing nodes being removed */
+			[ 'routing_node', 'routing_rule', 'dns_server', 'dns_rule', 'ruleset' ]
+			.forEach(function(type) {
+				uci.sections(uciconfig, type, function(res) {
+					if (filter_option(res['.name'], 'outbound', survives))
+						purged++;
+				});
+			});
+
+			var defout = uci.get(uciconfig, 'routing', 'default_outbound');
+			if (defout && deadnames.includes(defout)) {
+				uci.set(uciconfig, 'routing', 'default_outbound', 'direct-out');
+				purged++;
+			}
+
+			dead.forEach(function(res) {
+				uci.remove(uciconfig, res['.name']);
+				purged++;
+			});
+		}
+
+		return purged;
+	},
+
 	renderSectionAdd: function(section, prefmt, LC, extra_class) {
 		var el = form.GridSection.prototype.renderSectionAdd.apply(section, [ extra_class ]),
 			nameEl = el.querySelector('.cbi-section-create-name');

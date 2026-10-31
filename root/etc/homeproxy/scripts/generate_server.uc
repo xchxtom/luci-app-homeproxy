@@ -35,14 +35,30 @@ config.log = {
 };
 
 config.inbounds = [];
+config.route = { rules: [] };
 
 uci.foreach(uciconfig, uciserver, (cfg) => {
 	if (cfg.enabled !== '1')
 		return;
 
+	const inbound_tag = 'cfg-' + cfg['.name'] + '-in';
+
+	/*
+	 * Sniffing is a rule action instead of an inbound field since
+	 * sing-box 1.11.0.
+	 */
+	if (cfg.sniff_override === '1')
+		push(config.route.rules, { inbound: inbound_tag, action: 'sniff' });
+	if (!isEmpty(cfg.domain_strategy))
+		push(config.route.rules, {
+			inbound: inbound_tag,
+			action: 'resolve',
+			strategy: cfg.domain_strategy
+		});
+
 	push(config.inbounds, {
 		type: cfg.type,
-		tag: 'cfg-' + cfg['.name'] + '-in',
+		tag: inbound_tag,
 
 		listen: cfg.address || '::',
 		listen_port: strToInt(cfg.port),
@@ -50,9 +66,6 @@ uci.foreach(uciconfig, uciserver, (cfg) => {
 		tcp_multi_path: strToBool(cfg.tcp_multi_path),
 		udp_fragment: strToBool(cfg.udp_fragment),
 		udp_timeout: cfg.udp_timeout ? (cfg.udp_timeout + 's') : null,
-		sniff: true,
-		sniff_override_destination: (cfg.sniff_override === '1'),
-		domain_strategy: cfg.domain_strategy,
 		network: cfg.network,
 
 		/* Hysteria */
@@ -118,7 +131,9 @@ uci.foreach(uciconfig, uciserver, (cfg) => {
 			cipher_suites: cfg.tls_cipher_suites,
 			certificate_path: cfg.tls_cert_path,
 			key_path: cfg.tls_key_path,
-			acme: (cfg.tls_acme === '1') ? {
+			/* Inline ACME is deprecated in sing-box 1.14.0 */
+			certificate_provider: (cfg.tls_acme === '1') ? {
+				type: 'acme',
 				domain: cfg.tls_acme_domains,
 				data_directory: HP_DIR + '/certs',
 				default_server_name: cfg.tls_acme_dsn,

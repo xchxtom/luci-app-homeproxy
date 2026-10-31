@@ -30,6 +30,13 @@ const ucimain = 'config',
       ucinode = 'node',
       ucisubscription = 'subscription';
 
+const uciroutingsetting = 'routing',
+      uciroutingnode = 'routing_node',
+      uciroutingrule = 'routing_rule',
+      ucidnsserver = 'dns_server',
+      ucidnsrule = 'dns_rule',
+      uciruleset = 'ruleset';
+
 const allow_insecure = uci.get(uciconfig, ucisubscription, 'allow_insecure') || '0',
       filter_mode = uci.get(uciconfig, ucisubscription, 'filter_nodes') || 'nil',
       filter_keywords = uci.get(uciconfig, ucisubscription, 'filter_keywords') || [],
@@ -431,6 +438,137 @@ function parse_uri(uri) {
 	return config;
 }
 
+/* Built-in outbound tags, they do not point to any UCI section */
+function is_builtin_outbound(tag) {
+	return (tag in ['direct-out', 'block-out', 'nil', 'same']);
+}
+
+/* Unlike UCI sections, they are always "available" */
+function outbound_is_alive(tag) {
+	return is_builtin_outbound(tag) || !isEmpty(uci.get_all(uciconfig, tag));
+}
+
+/*
+ * Drop the outdated members of a list option.
+ * Return true if anything has been removed.
+ */
+function purge_list_option(sid, option, checker) {
+	const value = uci.get(uciconfig, sid, option);
+	if (isEmpty(value))
+		return false;
+
+	const entries = (type(value) === 'array') ? value : [value];
+	let kept = [], dropped = 0;
+
+	for (let entry in entries) {
+		if (checker(entry))
+			push(kept, entry);
+		else
+			dropped++;
+	}
+
+	if (dropped === 0)
+		return false;
+
+	uci.delete(uciconfig, sid, option);
+	if (length(kept) > 0)
+		uci.set(uciconfig, sid, option, kept);
+
+	return true;
+}
+
+/*
+ * A node that disappeared from the subscription may still be referenced by
+ * other sections. References to non-existing outbounds make the generated
+ * sing-box config invalid, which prevents homeproxy from starting.
+ */
+function cleanup_node_references() {
+	let cleaned = 0;
+
+	/* Collect everything first, mutating during foreach() is unsafe */
+	let collections = [];
+	uci.foreach(uciconfig, ucinode, (cfg) => {
+		if (cfg.type in ['selector', 'urltest'])
+			push(collections, {
+				sid: cfg['.name'],
+				label: cfg.label || cfg['.name']
+			});
+	});
+
+	for (let collection in collections) {
+		/* Node collection ("Outbounds") */
+		if (purge_list_option(collection.sid, 'order', outbound_is_alive)) {
+			log(sprintf('%s: removing outdated nodes from the outbound list.', collection.label));
+			cleaned++;
+		}
+
+		/* Default outbound of a selector */
+		const default_selected = uci.get(uciconfig, collection.sid, 'default_selected');
+		if (!isEmpty(default_selected) && !outbound_is_alive(default_selected)) {
+			log(sprintf('%s: resetting the default outbound.', collection.label));
+			uci.delete(uciconfig, collection.sid, 'default_selected');
+			cleaned++;
+		}
+	}
+
+	if (cleaned > 0)
+		log(sprintf('%s outdated node reference(s) cleaned up.', cleaned));
+
+	return cleaned;
+}
+
+/*
+ * Routing nodes depend on a node too. They cannot be repaired once their
+ * outbound node is gone, so drop them together with the references to them.
+ */
+function cleanup_routing_nodes() {
+	let dead = [];
+
+	uci.foreach(uciconfig, uciroutingnode, (cfg) => {
+		if (!isEmpty(cfg.node) && !outbound_is_alive(cfg.node))
+			push(dead, cfg['.name']);
+	});
+
+	if (length(dead) === 0)
+		return 0;
+
+	let cleaned = 0;
+	const refers_to_dead = (tag) => !(tag in dead);
+
+	/* Detour / outbound references pointing to the routing nodes being removed */
+	const outbound_refs = [
+		[uciroutingnode, 'outbound'],
+		[uciroutingrule, 'outbound'],
+		[ucidnsserver, 'outbound'],
+		[ucidnsrule, 'outbound'],
+		[uciruleset, 'outbound']
+	];
+
+	for (let ref in outbound_refs) {
+		uci.foreach(uciconfig, ref[0], (cfg) => {
+			if (purge_list_option(cfg['.name'], ref[1], refers_to_dead))
+				cleaned++;
+		});
+	}
+
+	/* Default outbound of the routing settings */
+	const default_outbound = uci.get(uciconfig, uciroutingsetting, 'default_outbound');
+	if (!isEmpty(default_outbound) && (default_outbound in dead)) {
+		log('Default outbound of routing settings is gone, resetting to direct.');
+		uci.set(uciconfig, uciroutingsetting, 'default_outbound', 'direct-out');
+		cleaned++;
+	}
+
+	for (let sid in dead) {
+		log(sprintf('Removing routing node: %s.', uci.get(uciconfig, sid, 'label') || sid));
+		uci.delete(uciconfig, sid);
+	}
+
+	log(sprintf('%s outdated routing node reference(s) cleaned up.', cleaned));
+
+	return cleaned;
+}
+
 function main() {
 	if (via_proxy !== '1') {
 		log('Stopping service...');
@@ -525,7 +663,7 @@ function main() {
 			uci.delete(uciconfig, cfg['.name']);
 			removed++;
 
-			log(sprintf('Removing node: %s.', cfg.label || cfg['name']));
+			log(sprintf('Removing node: %s.', cfg.label || cfg['.name']));
 		} else {
 			map(keys(node_cache[cfg.grouphash][cfg['.name']]), (v) => {
 				uci.set(uciconfig, cfg['.name'], v, node_cache[cfg.grouphash][cfg['.name']][v]);
@@ -545,6 +683,17 @@ function main() {
 			added++;
 			log(sprintf('Adding node: %s.', node.label));
 		});
+
+	/*
+	 * Nodes might have been removed above, drop the dangling references to
+	 * them before restarting the service, otherwise the generated config
+	 * would point to non-existing outbounds and sing-box would refuse to run.
+	 */
+	if (removed > 0) {
+		cleanup_node_references();
+		cleanup_routing_nodes();
+	}
+
 	uci.commit(uciconfig);
 
 	let need_restart = (via_proxy !== '1');

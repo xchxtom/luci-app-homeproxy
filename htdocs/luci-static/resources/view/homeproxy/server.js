@@ -805,7 +805,7 @@ return view.extend({
 		o.modalonly = true;
 
 		o = s.option(form.Flag, 'sniff_override', _('Override destination'),
-			_('Override the connection destination address with the sniffed domain.'));
+			_('Enable protocol sniffing and override the connection destination address with the sniffed domain.'));
 		o.rmempty = false;
 
 		o = s.option(form.ListValue, 'domain_strategy', _('Domain strategy'),

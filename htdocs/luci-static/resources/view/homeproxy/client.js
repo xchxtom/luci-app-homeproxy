@@ -319,12 +319,6 @@ return view.extend({
 		o.depends('routing_mode', 'custom');
 
 		ss = o.subsection;
-		so = ss.option(form.Flag, 'tun_gso', _('Generic segmentation offload'));
-		so.default = so.disabled;
-		so.depends('homeproxy.config.proxy_mode', 'redirect_tun');
-		so.depends('homeproxy.config.proxy_mode', 'tun');
-		so.rmempty = false;
-
 		so = ss.option(form.ListValue, 'tcpip_stack', _('TCP/IP stack'),
 			_('TCP/IP stack.'));
 		if (features.with_gvisor) {
@@ -368,7 +362,7 @@ return view.extend({
 		so.rmempty = false;
 
 		so = ss.option(form.Flag, 'sniff_override', _('Override destination'),
-			_('Override the connection destination address with the sniffed domain.'));
+			_('Enable protocol sniffing and override the connection destination address with the sniffed domain.'));
 		so.default = so.enabled;
 		so.rmempty = false;
 
@@ -701,26 +695,15 @@ return view.extend({
 		so.default = so.disabled;
 		so.depends('disable_cache', '0');
 
-		so = ss.option(form.Flag, 'independent_cache', _('Independent cache per server'),
-			_('Make each DNS server\'s cache independent for special purposes. If enabled, will slightly degrade performance.'));
-		so.default = so.disabled;
-		so.depends('disable_cache', '0');
-
 		so = ss.option(form.Value, 'client_subnet', _('EDNS Client subnet'),
 			_('Append a <code>edns0-subnet</code> OPT extra record with the specified IP prefix to every query by default.<br/>' +
 			'If value is an IP address instead of prefix, <code>/32</code> or <code>/128</code> will be appended automatically.'));
 		so.datatype = 'or(cidr, ipaddr)';
 
-		so = ss.option(form.Flag, 'cache_file_store_rdrc', _('Store RDRC'),
-			_('Store rejected DNS response cache.<br/>' +
-			'The check results of <code>Address filter DNS rule items</code> will be cached until expiration.'));
+		so = ss.option(form.Flag, 'cache_file_store_dns', _('Persistent DNS cache'),
+			_('Store the DNS cache in the cache file, so that it survives a restart.'));
 		so.ucisection = 'experimental';
 		so.default = so.disabled;
-
-		so = ss.option(form.Value, 'cache_file_rdrc_timeout', _('RDRC timeout'),
-			_('Timeout of rejected DNS response cache. <code>7d</code> is used by default.'));
-		so.ucisection = 'experimental';
-		so.depends('cache_file_store_rdrc', '1');
 		/* DNS settings end */
 
 		/* DNS servers start */
@@ -963,6 +946,12 @@ return view.extend({
 		so.value('global', _('Global'));
 		so.value('rule', _('Rule'));
 		so.value('direct', _('Direct'));
+		so.modalonly = true;
+
+		so = ss.taboption('field_other', form.Flag, 'match_response', _('Match response'),
+			_('Match <code>ip_cidr</code> / <code>ip_is_private</code> and rule sets against the query response.<br/>' +
+			'Required by sing-box 1.14.0 when any other DNS rule uses <code>ip_version</code> or <code>query_type</code>.'));
+		so.default = so.disabled;
 		so.modalonly = true;
 
 		so = ss.taboption('field_other', form.MultiValue, 'rule_set', _('Rule set'),

@@ -1,5 +1,24 @@
 #!/bin/sh
 
+# sing-box 1.14.0 dropped the legacy DNS server format and the `block` /
+# `dns` special outbounds; homeproxy now generates rule actions instead.
+# Migrate the UCI options that were renamed or removed along the way.
+
+# experimental.cache_file_store_rdrc -> experimental.cache_file_store_dns
+if [ -n "$(uci -q get "homeproxy.experimental.cache_file_store_rdrc")" ]; then
+	uci -q rename "homeproxy.experimental.cache_file_store_rdrc"="cache_file_store_dns"
+fi
+
+# The rejected DNS response cache timeout is gone together with store_rdrc
+uci -q delete "homeproxy.experimental.cache_file_rdrc_timeout"
+
+# dns.independent_cache is deprecated in sing-box 1.14.0
+uci -q delete "homeproxy.dns.independent_cache"
+
+# TUN GSO was removed in sing-box 1.13.0
+uci -q delete "homeproxy.infra.tun_gso"
+uci -q delete "homeproxy.routing.tun_gso"
+
 china_dns_server="$(uci -q get "homeproxy.config.china_dns_server")"
 if [ "$china_dns_server" = "wan_114" ]; then
 	uci -q delete "homeproxy.config.china_dns_server"
