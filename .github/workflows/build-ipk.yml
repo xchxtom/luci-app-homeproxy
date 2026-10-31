@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'master'
+      - 'master-1'
       - 'dev'
     paths:
       - 'htdocs/**'
@@ -15,6 +16,7 @@ on:
   pull_request:
     branches:
       - 'master'
+      - 'master-1'
       - 'dev'
     types:
       - opened
