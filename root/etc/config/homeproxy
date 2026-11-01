@@ -51,8 +51,8 @@ config homeproxy 'routing'
 	option default_outbound 'direct-out'
 
 config homeproxy 'dns'
-	option dns_strategy 'prefer_ipv4'
-	option default_server 'local-dns'
+	option default_strategy 'prefer_ipv4'
+	option default_server 'default-dns'
 	option disable_cache '0'
 	option disable_cache_expire '0'
 

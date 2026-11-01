@@ -19,6 +19,12 @@ uci -q delete "homeproxy.dns.independent_cache"
 uci -q delete "homeproxy.infra.tun_gso"
 uci -q delete "homeproxy.routing.tun_gso"
 
+# DNS servers do not accept a per server `client_subnet` anymore, the option
+# is only available globally (homeproxy.dns) and on DNS rules.
+for section in $(uci -q show homeproxy | sed -n "s/^homeproxy\.\([^.=]*\)\.client_subnet=.*/\1/p"); do
+	[ "$(uci -q get "homeproxy.$section")" = "dns_server" ] && uci -q delete "homeproxy.$section.client_subnet"
+done
+
 china_dns_server="$(uci -q get "homeproxy.config.china_dns_server")"
 if [ "$china_dns_server" = "wan_114" ]; then
 	uci -q delete "homeproxy.config.china_dns_server"
