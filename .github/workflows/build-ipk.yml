@@ -1,37 +1,6 @@
 name: Build ipk for HomeProxy
 
 on:
-  push:
-    branches:
-      - 'master'
-      - 'master-1'
-      - 'dev'
-    paths:
-      - 'htdocs/**'
-      - 'po/**'
-      - 'root/**'
-      - 'Makefile'
-      - '.github/**'
-
-  pull_request:
-    branches:
-      - 'master'
-      - 'master-1'
-      - 'dev'
-    types:
-      - opened
-      - synchronize
-      - reopened
-    paths:
-      - 'htdocs/**'
-      - 'root/**'
-      - 'Makefile'
-      - '.github/**'
-
-  release:
-    types:
-      - published
-
   workflow_dispatch:
 
 # GitHub Actions 权限
