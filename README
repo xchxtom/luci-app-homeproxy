@@ -18,6 +18,11 @@ Migrated away from the legacy configuration format:
 - The direct outbound `override_address` / `override_port` fields are replaced by
   `route-options`.
 - WireGuard is generated as an endpoint instead of an outbound.
+- Every dial field using a domain name needs a `domain_resolver`; `route.default_domain_resolver`
+  is set to the default DNS server as the fallback, and DNS servers dialing a domain name get
+  an explicit one.
+- The per DNS server `client_subnet` option is gone, `client_subnet` is only available globally
+  (DNS settings) and on DNS rules.
 - TUN `endpoint_independent_nat` is superseded by the UDP NAT fields
   (`udp_mapping` / `udp_filtering`), and TUN `inet4_address` / `inet6_address`
   are merged into `address`.

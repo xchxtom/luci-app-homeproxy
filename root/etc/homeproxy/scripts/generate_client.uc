@@ -76,6 +76,9 @@ if (routing_mode !== 'custom') {
 	/* DNS settings */
 	dns_default_strategy = uci.get(uciconfig, ucidnssetting, 'default_strategy');
 	dns_default_server = uci.get(uciconfig, ucidnssetting, 'default_server');
+	/* `local-dns` is a legacy alias of the system DNS server */
+	if (dns_default_server === 'local-dns' && isEmpty(uci.get_all(uciconfig, 'local-dns')))
+		dns_default_server = 'system-dns';
 	dns_disable_cache = uci.get(uciconfig, ucidnssetting, 'disable_cache');
 	dns_disable_cache_expire = uci.get(uciconfig, ucidnssetting, 'disable_cache_expire');
 	dns_client_subnet = uci.get(uciconfig, ucidnssetting, 'client_subnet');
@@ -648,14 +651,14 @@ function get_dns_conds(cfg) {
 	};
 }
 
-/* Legacy outbound DNS rule items are removed in sing-box 1.14.0 */
+/*
+ * Legacy outbound DNS rule items are removed in sing-box 1.14.0: dialing a
+ * domain name without a domain resolver is rejected, so the resolver has to
+ * be named explicitly and falls back to the default DNS server.
+ */
 function get_domain_resolver(resolver, strategy) {
-	const server = get_resolver(resolver);
-	if (isEmpty(server) && isEmpty(strategy))
-		return null;
-
 	return {
-		server: server,
+		server: get_resolver(resolver) || 'default-dns',
 		strategy: strategy
 	};
 }
@@ -768,10 +771,15 @@ if (!isEmpty(main_node)) {
 			detour: get_detour(cfg.outbound),
 			/*
 			 * address_resolver / address_strategy and the legacy server
-			 * strategy option are replaced by domain_resolver.
+			 * strategy option are replaced by domain_resolver, which is
+			 * only needed (and only accepted) by servers dialing a domain
+			 * name.
+			 *
+			 * client_subnet is a DNS rule / domain resolver field, DNS
+			 * servers do not accept it; dns.client_subnet is global.
 			 */
-			domain_resolver: get_domain_resolver(cfg.address_resolver, cfg.address_strategy || cfg.resolve_strategy),
-			client_subnet: cfg.client_subnet
+			domain_resolver: (!isEmpty(server.server) && validateHostname(server.server)) ?
+				get_domain_resolver(cfg.address_resolver, cfg.address_strategy || cfg.resolve_strategy) : null
 		});
 	});
 
@@ -866,7 +874,8 @@ if (!isEmpty(main_node)) {
 			rcode: action.rcode,
 			disable_cache: (cfg.dns_disable_cache === '1') || null,
 			rewrite_ttl: strToInt(cfg.rewrite_ttl),
-			client_subnet: cfg.client_subnet
+			/* client_subnet is only accepted by the query based actions */
+			client_subnet: (action.action === 'route') ? cfg.client_subnet : null
 		});
 
 		/* Outbound DNS rule items are removed in sing-box 1.14.0 */
@@ -883,7 +892,14 @@ if (!isEmpty(main_node)) {
 	if (isEmpty(config.dns.rules))
 		config.dns.rules = null;
 
-	config.dns.final = get_resolver(dns_default_server);
+	/* The block-dns server is replaced by the predefined rule action */
+	if (get_resolver(dns_default_server) === 'block-dns') {
+		config.dns.rules = config.dns.rules || [];
+		push(config.dns.rules, { action: 'predefined', rcode: 'NXDOMAIN' });
+		dns_default_server = 'default-dns';
+	}
+
+	config.dns.final = get_resolver(dns_default_server || 'default-dns');
 }
 /* DNS end */
 
@@ -1055,6 +1071,15 @@ while (length(groups_tobe_checkedout) > 0) {
 config.route = {
 	rules: [],
 	rule_set: [],
+	/*
+	 * Every dial field using a domain name needs a domain resolver since
+	 * sing-box 1.14.0; this is the fallback for outbounds, endpoints and DNS
+	 * servers that do not name one explicitly.
+	 */
+	default_domain_resolver: {
+		server: 'default-dns',
+		strategy: (ipv6_support !== '1') ? 'ipv4_only' : null
+	},
 	auto_detect_interface: isEmpty(default_interface) ? true : null,
 	default_interface: default_interface
 };
