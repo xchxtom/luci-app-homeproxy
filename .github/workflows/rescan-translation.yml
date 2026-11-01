@@ -1,12 +1,11 @@
 name: Rescan translation
 
 on:
-  push:
-    branches:
-      - 'master'
-    paths:
-      - 'htdocs/**'
-      - 'root/**'
+  workflow_dispatch:
+
+# GitHub Actions 权限
+permissions:
+  contents: write
 
 jobs:
   scan:
