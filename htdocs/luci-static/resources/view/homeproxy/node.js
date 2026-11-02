@@ -738,14 +738,44 @@ function renderNodeSettings(section, data, features, main_node, routing_mode, su
 	o.modalonly = true;
 
 	o = s.option(form.Value, 'default_selected', _('Default Outbound'),
-		_('The default outbound tag. The first outbound will be used if empty.'));
+		_('The default outbound tag. When subscription groups are used, only the nodes of the selected groups can be chosen. The first outbound will be used if empty.'));
 	o.value('', _('Default'));
 	o.value('direct-out', _('Direct'));
 	o.value('block-out', _('Block'));
-	for (var key in proxy_nodes)
-		o.value(key, proxy_nodes[key]);
+	/*
+	 * With subscription groups the outbound list is built from the group
+	 * members, so offer those nodes only - sing-box rejects a default
+	 * outbound which is not part of the outbound list.
+	 */
+	o.load = function(section_id) {
+		var groups = section_id ? uci.get(data[0], section_id, 'group') : null;
+
+		delete this.keylist;
+		delete this.vallist;
+
+		this.value('', _('Default'));
+		this.value('direct-out', _('Direct'));
+		this.value('block-out', _('Block'));
+
+		groups = [].concat(groups || []).filter(function(g) {
+			return !!g;
+		});
+
+		if (groups.length) {
+			var nodes = hp.loadNodesList(data[0], subs_info);
+			uci.sections(data[0], 'node', function(res) {
+				if (groups.includes(res.grouphash))
+					this.value(res['.name'], nodes[res['.name']]);
+			}.bind(this));
+		} else {
+			for (var key in proxy_nodes)
+				this.value(key, proxy_nodes[key]);
+		}
+
+		return this.super('load', section_id);
+	};
 	o.default = '';
-	o.depends({'group': /^$/, 'type': 'selector'});
+	o.depends('type', 'selector');
 	o.modalonly = true;
 
 	o = s.option(form.ListValue, 'filter_nodes', _('Filter nodes'),
