@@ -237,6 +237,26 @@ return baseclass.extend({
 	},
 
 	/*
+	 * The first node of the given subscription group(s), in config order.
+	 * Used to repair the default outbound of a group based selector.
+	 */
+	getFirstGroupNode: function(uciconfig, group) {
+		var groups = [].concat(group || []).filter(function(g) { return !!g; });
+		if (!groups.length)
+			return null;
+
+		var first = null;
+		uci.sections(uciconfig, 'node', function(res) {
+			if (first || !res.grouphash)
+				return;
+			if (groups.indexOf(res.grouphash) !== -1)
+				first = res['.name'];
+		});
+
+		return first;
+	},
+
+	/*
 	 * Purge references pointing to nodes/sections which no longer exist.
 	 *
 	 * The "Outbounds" list of a selector/urltest node (node collection) and
@@ -247,7 +267,8 @@ return baseclass.extend({
 	 * Returns the amount of cleaned up references.
 	 */
 	purgeInvalidNodeReferences: function(uciconfig) {
-		var specials = [ 'direct-out', 'block-out', 'nil', 'same' ],
+		var self = this,
+		    specials = [ 'direct-out', 'block-out', 'nil', 'same' ],
 		    purged = 0;
 
 		var alive = function(sid) {
@@ -285,7 +306,16 @@ return baseclass.extend({
 
 			var defnode = uci.get(uciconfig, res['.name'], 'default_selected');
 			if (defnode && !alive(defnode)) {
-				uci.unset(uciconfig, res['.name'], 'default_selected');
+				/*
+				 * Group based selectors fall back to the first node of the
+				 * group, otherwise the first outbound of the list is used.
+				 */
+				var firstnode = self.getFirstGroupNode(uciconfig, uci.get(uciconfig, res['.name'], 'group'));
+				if (firstnode)
+					uci.set(uciconfig, res['.name'], 'default_selected', firstnode);
+				else
+					uci.unset(uciconfig, res['.name'], 'default_selected');
+
 				purged++;
 			}
 		});

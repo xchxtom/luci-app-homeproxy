@@ -478,6 +478,28 @@ function purge_list_option(sid, option, checker) {
 }
 
 /*
+ * The first node of the given subscription group(s), in config order.
+ * Used to repair the default outbound of a selector.
+ */
+function get_first_group_node(group) {
+	if (isEmpty(group))
+		return null;
+
+	const groups = (type(group) === 'array') ? group : [group];
+	let first = null;
+
+	uci.foreach(uciconfig, ucinode, (cfg) => {
+		if (first || isEmpty(cfg.grouphash))
+			return null;
+
+		if (cfg.grouphash in groups)
+			first = cfg['.name'];
+	});
+
+	return first;
+}
+
+/*
  * A node that disappeared from the subscription may still be referenced by
  * other sections. References to non-existing outbounds make the generated
  * sing-box config invalid, which prevents homeproxy from starting.
@@ -505,8 +527,20 @@ function cleanup_node_references() {
 		/* Default outbound of a selector */
 		const default_selected = uci.get(uciconfig, collection.sid, 'default_selected');
 		if (!isEmpty(default_selected) && !outbound_is_alive(default_selected)) {
-			log(sprintf('%s: resetting the default outbound.', collection.label));
-			uci.delete(uciconfig, collection.sid, 'default_selected');
+			/*
+			 * Group based selectors build their outbound list from the group
+			 * members, so fall back to the first one of them. Without a group
+			 * the first outbound of the list is used anyway.
+			 */
+			const first_node = get_first_group_node(uci.get(uciconfig, collection.sid, 'group'));
+			if (first_node) {
+				uci.set(uciconfig, collection.sid, 'default_selected', first_node);
+				log(sprintf('%s: switching the default outbound to the first node of the group.', collection.label));
+			} else {
+				uci.delete(uciconfig, collection.sid, 'default_selected');
+				log(sprintf('%s: resetting the default outbound.', collection.label));
+			}
+
 			cleaned++;
 		}
 	}
