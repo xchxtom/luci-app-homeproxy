@@ -131,9 +131,11 @@ uci.foreach(uciconfig, uciserver, (cfg) => {
 			cipher_suites: cfg.tls_cipher_suites,
 			certificate_path: cfg.tls_cert_path,
 			key_path: cfg.tls_key_path,
-			/* Inline ACME is deprecated in sing-box 1.14.0 */
-			certificate_provider: (cfg.tls_acme === '1') ? {
-				type: 'acme',
+			/*
+			 * Inline ACME is configured with the `acme` field in sing-box
+			 * 1.11, it was renamed to `certificate_provider` in 1.14.
+			 */
+			acme: (cfg.tls_acme === '1') ? {
 				domain: cfg.tls_acme_domains,
 				data_directory: HP_DIR + '/certs',
 				default_server_name: cfg.tls_acme_dsn,

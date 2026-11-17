@@ -313,6 +313,33 @@ return view.extend({
 		o.default = o.enabled;
 		o.rmempty = false;
 
+		/* Node fail-over start */
+		o = s.taboption('routing', form.Flag, 'failover', _('Direct fallback on node failure'),
+			_('Keep direct networks reachable when the main node is unreachable. DNS hijack and transparent proxy rules are temporarily removed, and restored automatically once the node recovers.'));
+		o.default = o.enabled;
+		o.rmempty = false;
+
+		o = s.taboption('routing', form.Value, 'failover_probe_url', _('Failover probe URL'),
+			_('A plain HTTP URL used to check whether the proxy node is still usable.'));
+		o.default = 'http://www.gstatic.com/generate_204';
+		o.depends('failover', '1');
+		o.rmempty = false;
+
+		o = s.taboption('routing', form.Value, 'failover_interval', _('Failover probe interval'),
+			_('In seconds.'));
+		o.datatype = 'uinteger';
+		o.default = '5';
+		o.depends('failover', '1');
+		o.rmempty = false;
+
+		o = s.taboption('routing', form.Value, 'failover_threshold', _('Failover trigger count'),
+			_('Number of consecutive failed probes before falling back to direct connection.'));
+		o.datatype = 'uinteger';
+		o.default = '3';
+		o.depends('failover', '1');
+		o.rmempty = false;
+		/* Node fail-over end */
+
 		/* Custom routing settings start */
 		/* Routing settings start */
 		o = s.taboption('routing', form.SectionValue, '_routing', form.NamedSection, 'routing', 'homeproxy');
@@ -904,14 +931,21 @@ return view.extend({
 		so.default = so.disabled;
 		so.modalonly = true;
 
+		/*
+		 * sing-box 1.11 dropped DNS response matching: `ip_cidr` and
+		 * `ip_is_private` would match every query and break name resolution,
+		 * so they are only kept for compatibility and are not generated.
+		 */
 		so = ss.taboption('field_other', form.DynamicList, 'ip_cidr', _('IP CIDR'),
-			_('Match IP CIDR with query response.'));
+			_('Not supported: match IP CIDR with query response.'));
 		so.datatype = 'or(cidr, ipaddr)';
+		so.readonly = true;
 		so.modalonly = true;
 
 		so = ss.taboption('field_other', form.Flag, 'ip_is_private', _('Private IP'),
-			_('Match private IP with query response.'));
+			_('Not supported: match private IP with query response.'));
 		so.default = so.disabled;
+		so.readonly = true;
 		so.modalonly = true;
 
 		so = ss.taboption('field_source_port', form.DynamicList, 'source_port', _('Source port'),
@@ -944,12 +978,6 @@ return view.extend({
 		so.value('direct', _('Direct'));
 		so.modalonly = true;
 
-		so = ss.taboption('field_other', form.Flag, 'match_response', _('Match response'),
-			_('Match <code>ip_cidr</code> / <code>ip_is_private</code> and rule sets against the query response.<br/>' +
-			'Required by sing-box 1.14.0 when any other DNS rule uses <code>ip_version</code> or <code>query_type</code>.'));
-		so.default = so.disabled;
-		so.modalonly = true;
-
 		so = ss.taboption('field_other', form.MultiValue, 'rule_set', _('Rule set'),
 			_('Match rule set.'));
 		so.load = function(section_id) {
@@ -977,7 +1005,8 @@ return view.extend({
 		so.modalonly = true;
 
 		so = ss.taboption('field_other', form.MultiValue, 'outbound', _('Outbound'),
-			_('Match <code>.outbounds[].server</code> domains.'));
+			_('Not supported by sing-box 1.11, use the domain strategy of the outbound instead.'));
+		so.readonly = true;
 		so.load = function(section_id) {
 			delete this.keylist;
 			delete this.vallist;

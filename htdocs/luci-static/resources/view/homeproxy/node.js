@@ -357,7 +357,7 @@ function parseShareLink(uri, features) {
 }
 
 function renderNodeSettings(section, data, features, main_node, routing_mode, subs_info, proxy_nodes) {
-	var s = section, o;
+	var s = section, o, group_option;
 	s.rowcolors = true;
 	s.sortable = true;
 	s.nodescriptions = true;
@@ -727,6 +727,7 @@ function renderNodeSettings(section, data, features, main_node, routing_mode, su
 	o.depends('type', 'selector');
 	o.depends('type', 'urltest');
 	o.modalonly = true;
+	group_option = o;
 
 	o = s.option(form.MultiValue, 'order', _('Outbounds'),
 		_('List of outbound tags.'));
@@ -737,16 +738,100 @@ function renderNodeSettings(section, data, features, main_node, routing_mode, su
 	o.depends({'group': /^$/, 'type': /^(selector|urltest)$/});
 	o.modalonly = true;
 
+	/*
+	 * Rebuild the "Default Outbound" choices from the Subscription Groups the
+	 * node is bound to: with subscription groups the outbound list of the
+	 * selector is built from the group members, and sing-box rejects a
+	 * default outbound which is not part of that list.
+	 */
+	var fill_default_outbound = function(opt, section_id) {
+		var groups = [].concat(uci.get(data[0], section_id, 'group') || []).filter(function(g) {
+			return !!g;
+		});
+
+		opt.keylist = [];
+		opt.vallist = [];
+
+		opt.value('', _('Default'));
+		opt.value('direct-out', _('Direct'));
+		opt.value('block-out', _('Block'));
+
+		if (!groups.length) {
+			for (var key in proxy_nodes)
+				opt.value(key, proxy_nodes[key]);
+
+			return;
+		}
+
+		var nodes = hp.loadNodesList(data[0], subs_info),
+		    matched = 0;
+
+		uci.sections(data[0], 'node', function(res) {
+			if (!res.grouphash || groups.indexOf(res.grouphash) === -1 || !nodes[res['.name']])
+				return;
+
+			opt.value(res['.name'], nodes[res['.name']]);
+			matched++;
+		});
+
+		/*
+		 * Never leave the list without any node: when the group selection
+		 * cannot be matched (e.g. the nodes were removed by a subscription
+		 * update), offer every known node instead.
+		 */
+		if (!matched)
+			for (var key2 in proxy_nodes)
+				opt.value(key2, proxy_nodes[key2]);
+	};
+
 	o = s.option(form.Value, 'default_selected', _('Default Outbound'),
-		_('The default outbound tag. The first outbound will be used if empty.'));
+		_('The default outbound tag. When subscription groups are used, only the nodes of the selected groups can be chosen. The first outbound will be used if empty.'));
+	o.default = '';
 	o.value('', _('Default'));
 	o.value('direct-out', _('Direct'));
 	o.value('block-out', _('Block'));
-	for (var key in proxy_nodes)
-		o.value(key, proxy_nodes[key]);
-	o.default = '';
-	o.depends({'group': /^$/, 'type': 'selector'});
+	o.depends('type', 'selector');
 	o.modalonly = true;
+
+	o.load = function(section_id) {
+		fill_default_outbound(this, section_id);
+
+		return this.super('load', section_id);
+	};
+
+	/*
+	 * Refresh the choices as soon as another subscription group is picked,
+	 * otherwise the nodes of a freshly selected group would only show up
+	 * after saving and reopening the modal.
+	 */
+	if (group_option)
+		group_option.onchange = function(ev, section_id) {
+			try {
+				var found = this.map.lookupOption('default_selected', section_id);
+				if (!found)
+					return;
+
+				var opt = found[0],
+				    sid = found[1] || section_id;
+
+				fill_default_outbound(opt, sid);
+
+				var node = opt.map.findElement('id', opt.cbid(sid));
+				if (node && node.tagName !== 'SELECT')
+					node = node.querySelector('select');
+				if (!node || !node.options)
+					return;
+
+				while (node.firstChild)
+					node.removeChild(node.firstChild);
+
+				for (var i = 0; i < opt.keylist.length; i++)
+					node.appendChild(new Option(opt.vallist[i], opt.keylist[i]));
+			}
+			catch (e) {
+				/* Keep the previous choices on unexpected markup */
+			}
+		};
 
 	o = s.option(form.ListValue, 'filter_nodes', _('Filter nodes'),
 		_('Drop/keep specific nodes from outbounds.'));

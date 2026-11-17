@@ -67,11 +67,11 @@ if (routing_mode !== 'custom') {
 
 	direct_domain_list = trim(readfile(HP_DIR + '/resources/direct_list.txt'));
 	if (direct_domain_list)
-		direct_domain_list = split(direct_domain_list, /[\r\n]/);
+		direct_domain_list = filter(split(direct_domain_list, /[\r\n]/), (d) => length(d) > 0);
 
 	proxy_domain_list = trim(readfile(HP_DIR + '/resources/proxy_list.txt'));
 	if (proxy_domain_list)
-		proxy_domain_list = split(proxy_domain_list, /[\r\n]/);
+		proxy_domain_list = filter(split(proxy_domain_list, /[\r\n]/), (d) => length(d) > 0);
 } else {
 	/* DNS settings */
 	dns_default_strategy = uci.get(uciconfig, ucidnssetting, 'default_strategy');
@@ -145,8 +145,6 @@ let checkedout_nodes = [],
     checkedout_groups = [],
     groups_tobe_checkedout = [],
     endpoints = [],
-    rcode_servers = {},
-    domain_resolvers = {},
     direct_overrides = {};
 /* UCI config end */
 
@@ -177,10 +175,12 @@ function parse_dnsquery(strquery) {
 
 /*
  * Check whether an outbound reference still points to an existing UCI node.
- * Built-in tags (direct-out / block-out) are always available.
+ * `direct-out` / `block-out` are built-in, `nil` / `same` are sentinels used
+ * by the main node options and never refer to a section - treat all of them
+ * as available so that they are not reported as missing.
  */
 function outbound_is_alive(tag) {
-	if (isEmpty(tag) || (tag in ['direct-out', 'block-out']))
+	if (isEmpty(tag) || (tag in ['direct-out', 'block-out', 'nil', 'same']))
 		return true;
 
 	return !isEmpty(uci.get_all(uciconfig, tag));
@@ -300,13 +300,42 @@ function generate_outbound(node, tag_override) {
 		/* Block is a rule action instead of an outbound since sing-box 1.11.0 */
 		if (length(outbounds) === 0)
 			push(outbounds, 'direct-out');
+
+		/*
+		 * sing-box rejects a default outbound which is not part of the list,
+		 * and a urltest outbound does not accept the `default` field at all.
+		 */
+		let default_out = null;
+		if (node.type === 'selector') {
+			if (!isEmpty(node.default_selected) && node.default_selected !== 'block-out') {
+				if (outbound_is_alive(node.default_selected)) {
+					const tag = get_tag(node.default_selected, 'cfg-' + node.default_selected + '-out');
+					if (tag in outbounds)
+						default_out = tag;
+				}
+
+				/*
+				 * The node is gone (removed by a subscription update),
+				 * filtered out or not a member of the selected groups.
+				 * Falling back to the first outbound keeps the generated
+				 * config loadable.
+				 */
+				if (!default_out)
+					warn(sprintf('homeproxy: default outbound "%s" of "%s" is not available, falling back to "%s"\n',
+						node.default_selected, node.label || node['.name'], outbounds[0]));
+			}
+
+			/* sing-box uses the first outbound when no default is given */
+			if (!default_out)
+				default_out = outbounds[0];
+		}
+
 		return {
 			type: node.type,
 			tag: tag_override || get_tag(node, 'cfg-' + node['.name'] + '-out'),
 			/* Selector */
 			outbounds: outbounds,
-			default: (outbound_is_alive(node.default_selected) && node.default_selected !== 'block-out') ?
-				(node.default_selected ? (get_tag(node.default_selected, 'cfg-' + node.default_selected + '-out')) : null) : null,
+			default: default_out,
 			/* URLTest */
 			url: node.test_url,
 			interval: node.interval,
@@ -513,24 +542,63 @@ function get_detour(cfg) {
 	return (outbound !== 'block-out') ? outbound : null;
 }
 
-/* `block` is a rule action instead of an outbound since sing-box 1.11.0 */
-function get_route_action(outbound) {
+/*
+ * `block` is a rule action instead of an outbound since sing-box 1.11.0.
+ *
+ * The rule action `outbound` field only accepts a single tag in sing-box
+ * 1.11, so a multi outbound selection is expanded into one rule per outbound.
+ * The first matching rule wins, which keeps the original order semantics.
+ */
+function merge_rule(conds, action) {
+	let rule = {};
+
+	for (let k in keys(conds))
+		rule[k] = conds[k];
+	for (let k in keys(action))
+		rule[k] = action[k];
+
+	return rule;
+}
+
+/*
+ * Returns the route rules (an array, may be empty) matching `conds` for the
+ * given outbound selection. It is intentionally side effect free: ucode
+ * resolves top level names at compile time, so a helper declared here cannot
+ * refer to `config` which is declared further below.
+ */
+function build_route_rules(conds, outbound) {
+	let rules = [], outbounds = [];
+
 	if (type(outbound) === 'array') {
-		let outbounds = [];
 		for (let i in outbound)
-			if (i !== 'block-out')
+			if (i !== 'block-out' && !isEmpty(i))
 				push(outbounds, i);
-
-		if (length(outbounds) === 0)
-			return { action: 'reject' };
-
-		return { action: 'route', outbound: outbounds };
+	} else if (!isEmpty(outbound) && outbound !== 'block-out') {
+		push(outbounds, outbound);
 	}
 
-	if (outbound === 'block-out')
-		return { action: 'reject' };
+	if (length(outbounds) === 0) {
+		push(rules, merge_rule(conds, { action: 'reject' }));
+		return rules;
+	}
 
-	return { action: 'route', outbound: outbound };
+	for (let tag in outbounds) {
+		const rule = merge_rule(conds, { action: 'route', outbound: tag });
+
+		/*
+		 * Destination override fields of the direct outbound are route
+		 * options since sing-box 1.11.0.
+		 */
+		const options = direct_overrides[tag];
+		if (options) {
+			rule.override_address = options.override_address;
+			rule.override_port = options.override_port;
+		}
+
+		push(rules, rule);
+	}
+
+	return rules;
 }
 /* Config helper end */
 
@@ -545,88 +613,22 @@ config.log = {
 };
 
 /*
- * Legacy DNS server addresses (`address` strings) are removed in sing-box
- * 1.14.0, translate them into the new type based format.
+ * sing-box 1.11 only supports the legacy DNS server format, that is an
+ * `address` string such as `udp://1.1.1.1`, `tcp://1.1.1.1:53`,
+ * `tls://1.1.1.1:853`, `https://dns.example/dns-query`, `local`,
+ * `dhcp://auto` or `rcode://name_error`. The type based format
+ * (`{"type": "udp", "server": ...}`) is only available since 1.12.
  */
-function parse_dnsaddress(address) {
-	if (isEmpty(address))
-		return null;
+function wrap_dns_address(protocol, server) {
+	if (isEmpty(server))
+		return protocol;
 
-	const url = parseURL(address);
-	/* A bare IP or host name: plain UDP DNS */
-	if (!url)
-		return { type: 'udp', server: address };
+	const host = validation('ip6addr', server) ? `[${server}]` : server;
 
-	switch (url.protocol) {
-	case 'local':
-	case 'fakeip':
-		return { type: url.protocol };
-
-	case 'dhcp':
-		return (url.hostname === 'auto') ? { type: 'dhcp' } :
-			{ type: 'dhcp', interface: url.hostname };
-
-	case 'tcp':
-	case 'udp':
-	case 'tls':
-	case 'quic':
-		return {
-			type: url.protocol,
-			server: url.hostname,
-			server_port: strToInt(url.port)
-		};
-
-	case 'https':
-	case 'h3':
-		return {
-			type: url.protocol,
-			server: url.hostname,
-			server_port: strToInt(url.port),
-			path: (url.pathname && url.pathname !== '/') ? url.pathname : null
-		};
-
-	default:
-		return { type: 'udp', server: address };
-	}
+	return `${protocol}://${host}`;
 }
 
-/*
- * `rcode://` DNS servers are removed in sing-box 1.14.0, they are replaced by the
- * `predefined` DNS rule action.
- */
-const rcode_map = {
-	success: 'NOERROR',
-	format_error: 'FORMERR',
-	server_failure: 'SERVFAIL',
-	name_error: 'NXDOMAIN',
-	not_implemented: 'NOTIMP',
-	refused: 'REFUSED'
-};
-
-function parse_dnsrcode(address) {
-	if (isEmpty(address))
-		return null;
-
-	if (address === 'block-dns')
-		return 'NXDOMAIN';
-
-	const rcode = match(address, /^rcode:\/\/(.*)$/);
-	return rcode ? (rcode_map[rcode[1]] || 'NXDOMAIN') : null;
-}
-
-/* `server` is a part of the DNS rule action since sing-box 1.11.0 */
-function get_dns_action(server) {
-	const rcode = parse_dnsrcode(server) || rcode_servers[get_resolver(server)];
-	if (rcode)
-		return { action: 'predefined', rcode: rcode };
-
-	return { action: 'route', server: get_resolver(server) };
-}
-
-/*
- * Match conditions of a custom DNS rule. Shared by the `evaluate` rule and the
- * following response matching rule.
- */
+/* Match conditions of a custom DNS rule */
 function get_dns_conds(cfg) {
 	return {
 		ip_version: strToInt(cfg.ip_version),
@@ -652,15 +654,37 @@ function get_dns_conds(cfg) {
 }
 
 /*
- * Legacy outbound DNS rule items are removed in sing-box 1.14.0: dialing a
- * domain name without a domain resolver is rejected, so the resolver has to
- * be named explicitly and falls back to the default DNS server.
+ * sing-box 1.11 rejects a DNS rule that carries no match condition at all
+ * ("missing conditions"), and the fields that made such a rule non empty in
+ * 1.14 (`outbound`, `ip_cidr`, `ip_is_private`, `match_response`) do not
+ * exist here. Detect them so that a single leftover rule cannot break the
+ * whole configuration.
  */
-function get_domain_resolver(resolver, strategy) {
-	return {
-		server: get_resolver(resolver) || 'default-dns',
-		strategy: strategy
-	};
+const dns_rule_meta_keys = {
+	action: true,
+	server: true,
+	disable_cache: true,
+	rewrite_ttl: true,
+	client_subnet: true,
+	invert: true
+};
+
+function dns_rule_has_conds(rule) {
+	for (let k in keys(rule))
+		if (!dns_rule_meta_keys[k] && !isEmpty(rule[k]))
+			return true;
+
+	return false;
+}
+
+function push_dns_rule(rule, name) {
+	if (dns_rule_has_conds(rule)) {
+		push(config.dns.rules, rule);
+		return;
+	}
+
+	warn('homeproxy: DNS rule "' + name + '" has no match condition supported ' +
+	     'by sing-box 1.11, ignored\n');
 }
 
 /* DNS start */
@@ -668,15 +692,18 @@ function get_domain_resolver(resolver, strategy) {
 config.dns = {
 	servers: [
 		{
-			type: 'udp',
 			tag: 'default-dns',
-			server: wan_dns,
+			address: wrap_dns_address('udp', wan_dns),
 			detour: 'direct-out'
 		},
 		{
-			type: 'local',
 			tag: 'system-dns',
+			address: 'local',
 			detour: 'direct-out'
+		},
+		{
+			tag: 'block-dns',
+			address: 'rcode://name_error'
 		}
 	],
 	rules: [],
@@ -690,37 +717,33 @@ if (!isEmpty(main_node)) {
 	/* Avoid DNS loop */
 	const main_node_addr = uci.get(uciconfig, main_node, 'address');
 	if (validateHostname(main_node_addr))
-		push(config.dns.rules, {
+		push_dns_rule({
 			domain: main_node_addr,
-			action: 'route',
 			server: 'default-dns'
-		});
+		}, 'main_node');
 
 	if (dedicated_udp_node) {
 		const main_udp_node_addr = uci.get(uciconfig, main_udp_node, 'address');
 		if (validateHostname(main_udp_node_addr))
-			push(config.dns.rules, {
+			push_dns_rule({
 				domain: main_udp_node_addr,
-				action: 'route',
 				server: 'default-dns'
-			});
+			}, 'main_udp_node');
 	}
 
 	if (direct_domain_list)
-		push(config.dns.rules, {
+		push_dns_rule({
 			domain_keyword: direct_domain_list,
-			action: 'route',
 			server: 'default-dns'
-		});
+		}, 'direct_list');
 
 	/* Filter out SVCB/HTTPS queries for "exquisite" Apple devices */
 	if (routing_mode === 'gfwlist' || proxy_domain_list)
-		push(config.dns.rules, {
+		push_dns_rule({
 			domain_keyword: (routing_mode !== 'gfwlist') ? proxy_domain_list : null,
 			query_type: [64, 65],
-			action: 'predefined',
-			rcode: 'NXDOMAIN'
-		});
+			server: 'block-dns'
+		}, 'svcb_filter');
 
 	if (isEmpty(config.dns.rules))
 		config.dns.rules = null;
@@ -728,15 +751,13 @@ if (!isEmpty(main_node)) {
 	let default_final_dns = 'default-dns';
 	/* Main DNS */
 	if (dns_server !== wan_dns) {
-		const main_dns = parse_dnsaddress('tcp://' + (validation('ip6addr', dns_server) ? `[${dns_server}]` : dns_server));
 		push(config.dns.servers, {
-			type: main_dns.type,
 			tag: 'main-dns',
-			server: main_dns.server,
-			server_port: main_dns.server_port,
-			detour: 'main-out',
-			/* Legacy DNS server `strategy` is replaced by the domain resolver */
-			domain_resolver: get_domain_resolver('default-dns', (ipv6_support !== '1') ? 'ipv4_only' : null)
+			address: match(dns_server, /:\/\//) ? dns_server : wrap_dns_address('tcp', dns_server),
+			strategy: (ipv6_support !== '1') ? 'ipv4_only' : null,
+			address_resolver: 'default-dns',
+			address_strategy: (ipv6_support !== '1') ? 'ipv4_only' : null,
+			detour: 'main-out'
 		});
 
 		default_final_dns = 'main-dns';
@@ -749,102 +770,39 @@ if (!isEmpty(main_node)) {
 		if (cfg.enabled !== '1')
 			return;
 
-		const tag = 'cfg-' + cfg['.name'] + '-dns';
-
-		const rcode = parse_dnsrcode(cfg.address);
-		if (rcode) {
-			rcode_servers[tag] = rcode;
-			return;
-		}
-
-		const server = parse_dnsaddress(cfg.address);
-		if (isEmpty(server))
+		/* A bare address is treated as UDP DNS by sing-box */
+		if (isEmpty(cfg.address))
 			return;
 
 		push(config.dns.servers, {
-			type: server.type,
-			tag: tag,
-			server: server.server,
-			server_port: server.server_port,
-			path: server.path,
-			interface: server.interface,
+			tag: 'cfg-' + cfg['.name'] + '-dns',
+			address: cfg.address,
+			address_resolver: get_resolver(cfg.address_resolver),
+			address_strategy: cfg.address_strategy,
+			strategy: cfg.resolve_strategy,
 			detour: get_detour(cfg.outbound),
-			/*
-			 * address_resolver / address_strategy and the legacy server
-			 * strategy option are replaced by domain_resolver, which is
-			 * only needed (and only accepted) by servers dialing a domain
-			 * name.
-			 *
-			 * client_subnet is a DNS rule / domain resolver field, DNS
-			 * servers do not accept it; dns.client_subnet is global.
-			 */
-			domain_resolver: (!isEmpty(server.server) && validateHostname(server.server)) ?
-				get_domain_resolver(cfg.address_resolver, cfg.address_strategy || cfg.resolve_strategy) : null
+			client_subnet: cfg.client_subnet
 		});
 	});
 
 	/* DNS rules */
-	let dns_rules = [];
 	uci.foreach(uciconfig, ucidnsrule, (cfg) => {
-		if (cfg.enabled === '1')
-			push(dns_rules, cfg);
-	});
+		if (cfg.enabled !== '1')
+			return;
 
-	/*
-	 * Legacy address filter fields (`ip_cidr` / `ip_is_private` without
-	 * `match_response`) are rejected at startup as soon as any DNS rule
-	 * uses `ip_version`, `query_type`, `evaluate` or `match_response`.
-	 * The check is global, so migrate every affected rule at once.
-	 */
-	let resp_match = (routing_mode === 'gfwlist') || !isEmpty(proxy_domain_list);
-	for (let cfg in dns_rules)
-		if ((cfg.match_response === '1') || !isEmpty(cfg.ip_version) || !isEmpty(cfg.query_type))
-			resp_match = true;
-
-	for (let cfg in dns_rules) {
-		const action = get_dns_action(cfg.server),
-		      conds = get_dns_conds(cfg),
-		      has_filter = !isEmpty(cfg.ip_cidr) || (cfg.ip_is_private === '1');
+		const conds = get_dns_conds(cfg);
 
 		/*
-		 * Query the target server up front with the `evaluate` action and
-		 * match the address filter fields against its response instead.
+		 * The rule `outbound` field, `ip_cidr`, `ip_is_private` and
+		 * `match_response` are not emitted on purpose: they only exist in
+		 * sing-box 1.12+, and a stray `ip_cidr` would match every query on
+		 * sing-box 1.11 and break name resolution.
 		 *
-		 * `evaluate` needs a real DNS server, so predefined responses can
-		 * not be filtered by address and the fields are dropped instead.
+		 * A rule left without any condition (for example the pre-seeded
+		 * `nodes_domain` rule, which only has an `outbound`) is dropped by
+		 * push_dns_rule() instead of making sing-box refuse to start.
 		 */
-		const match_response = (action.action === 'route') &&
-			((cfg.match_response === '1') || (has_filter && resp_match)),
-		      drop_filter = (has_filter && resp_match && action.action !== 'route');
-
-		if (match_response)
-			push(config.dns.rules, {
-				ip_version: conds.ip_version,
-				query_type: conds.query_type,
-				network: conds.network,
-				protocol: conds.protocol,
-				domain: conds.domain,
-				domain_suffix: conds.domain_suffix,
-				domain_keyword: conds.domain_keyword,
-				domain_regex: conds.domain_regex,
-				port: conds.port,
-				port_range: conds.port_range,
-				source_ip_cidr: conds.source_ip_cidr,
-				source_ip_is_private: conds.source_ip_is_private,
-				source_port: conds.source_port,
-				source_port_range: conds.source_port_range,
-				process_name: conds.process_name,
-				process_path: conds.process_path,
-				user: conds.user,
-				clash_mode: conds.clash_mode,
-				rule_set: get_ruleset(cfg.rule_set),
-				rule_set_ip_cidr_match_source: (cfg.rule_set_ipcidr_match_source === '1') || null,
-				invert: conds.invert,
-				action: 'evaluate',
-				server: action.server
-			});
-
-		push(config.dns.rules, {
+		push_dns_rule({
 			ip_version: conds.ip_version,
 			query_type: conds.query_type,
 			network: conds.network,
@@ -866,40 +824,18 @@ if (!isEmpty(main_node)) {
 			rule_set: get_ruleset(cfg.rule_set),
 			rule_set_ip_cidr_match_source: (cfg.rule_set_ipcidr_match_source === '1') || null,
 			invert: conds.invert,
-			match_response: match_response || null,
-			ip_cidr: drop_filter ? null : cfg.ip_cidr,
-			ip_is_private: drop_filter ? null : ((cfg.ip_is_private === '1') || null),
-			action: action.action,
-			server: action.server,
-			rcode: action.rcode,
+			action: 'route',
+			server: get_resolver(cfg.server) || 'default-dns',
 			disable_cache: (cfg.dns_disable_cache === '1') || null,
 			rewrite_ttl: strToInt(cfg.rewrite_ttl),
-			/* client_subnet is only accepted by the query based actions */
-			client_subnet: (action.action === 'route') ? cfg.client_subnet : null
-		});
-
-		/* Outbound DNS rule items are removed in sing-box 1.14.0 */
-		const detour = get_detour(cfg.outbound);
-		if (!isEmpty(detour) && type(detour) === 'string' && action.action === 'route')
-			domain_resolvers[detour] = {
-				server: action.server,
-				disable_cache: (cfg.dns_disable_cache === '1') || null,
-				rewrite_ttl: strToInt(cfg.rewrite_ttl),
-				client_subnet: cfg.client_subnet
-			};
-	}
+			client_subnet: cfg.client_subnet
+		}, cfg['.name'] || cfg.label || 'dns_rule');
+	});
 
 	if (isEmpty(config.dns.rules))
 		config.dns.rules = null;
 
-	/* The block-dns server is replaced by the predefined rule action */
-	if (get_resolver(dns_default_server) === 'block-dns') {
-		config.dns.rules = config.dns.rules || [];
-		push(config.dns.rules, { action: 'predefined', rcode: 'NXDOMAIN' });
-		dns_default_server = 'default-dns';
-	}
-
-	config.dns.final = get_resolver(dns_default_server || 'default-dns');
+	config.dns.final = get_resolver(dns_default_server || 'default-dns') || 'default-dns';
 }
 /* DNS end */
 
@@ -959,13 +895,12 @@ if (match(proxy_mode, /tun/)) {
 	});
 
 	/*
-	 * endpoint_independent_nat becomes a no-op in sing-box 1.11.0 and is
-	 * superseded by the UDP NAT fields in sing-box 1.14.0.
+	 * `endpoint_independent_nat` is still supported in sing-box 1.11, the
+	 * UDP NAT fields (`udp_mapping` / `udp_filtering`) only exist since 1.14.
 	 */
-	if (endpoint_independent_nat === '0') {
+	if (!isEmpty(endpoint_independent_nat)) {
 		const tun_in = config.inbounds[length(config.inbounds) - 1];
-		tun_in.udp_mapping = 'address_and_port_dependent';
-		tun_in.udp_filtering = 'address_and_port_dependent';
+		tun_in.endpoint_independent_nat = strToBool(endpoint_independent_nat);
 	}
 }
 /* Inbound end */
@@ -1013,11 +948,11 @@ if (!isEmpty(main_node)) {
 
 		if (outbound && !(outbound.type in ['selector', 'urltest'])) {
 			/*
-			 * The outbound `domain_strategy` is replaced by the domain
-			 * resolver since sing-box 1.12.0.
-			*/
-			outbound.domain_resolver = domain_resolvers[outbound.tag] ||
-				get_domain_resolver('', cfg.domain_strategy);
+			 * `route.default_domain_resolver` and the outbound
+			 * `domain_resolver` field only exist since sing-box 1.14, the
+			 * legacy outbound `domain_strategy` is used instead.
+			 */
+			outbound.domain_strategy = cfg.domain_strategy;
 			outbound.bind_interface = cfg.bind_interface;
 			outbound.detour = get_detour(cfg.outbound);
 		}
@@ -1059,11 +994,24 @@ while (length(groups_tobe_checkedout) > 0) {
 	const hashexp = regexp('^' + replace(replace(replace(sprintf("%J", newarr), /^\[(.*)\]$/g, "($1)"), /[" ]/g, ''), ',', '|') + '$', 'is');
 	uci.foreach(uciconfig, ucinode, (cfg) => {
 		if (!(cfg['.name'] in checkedout_nodes) && match(cfg?.grouphash, hashexp)) {
-			push(config.outbounds, generate_outbound(cfg));
 			push(checkedout_nodes, cfg['.name']);
+
+			/* generate_outbound() returns null for endpoints (e.g. WireGuard) */
+			const outbound = generate_outbound(cfg);
+			if (outbound)
+				push(config.outbounds, outbound);
 		}
 	});
 }
+/*
+ * IPv6 is disabled: make every proxy outbound prefer IPv4 when it dials a
+ * domain name. This replaces `route.default_domain_resolver`, which is only
+ * available since sing-box 1.14.
+ */
+if (ipv6_support !== '1')
+	for (let outbound in config.outbounds)
+		if (!(outbound.type in ['direct', 'selector', 'urltest']) && isEmpty(outbound.domain_strategy))
+			outbound.domain_strategy = 'prefer_ipv4';
 /* Outbound end */
 
 /* Routing rules start */
@@ -1071,27 +1019,46 @@ while (length(groups_tobe_checkedout) > 0) {
 config.route = {
 	rules: [],
 	rule_set: [],
-	/*
-	 * Every dial field using a domain name needs a domain resolver since
-	 * sing-box 1.14.0; this is the fallback for outbounds, endpoints and DNS
-	 * servers that do not name one explicitly.
-	 */
-	default_domain_resolver: {
-		server: 'default-dns',
-		strategy: (ipv6_support !== '1') ? 'ipv4_only' : null
-	},
 	auto_detect_interface: isEmpty(default_interface) ? true : null,
 	default_interface: default_interface
 };
 
 /*
  * Sniffing is a rule action instead of an inbound field since sing-box 1.11.0.
+ *
+ * The "override destination" part however cannot be expressed by the sniff
+ * rule action on sing-box 1.11: the `override_destination` field only exists
+ * since 1.12 and is rejected as an unknown field by 1.11, so the sniff action
+ * there can only detect the protocol/domain without replacing the connection
+ * destination. The deprecated inbound level fields are still honoured by
+ * 1.11, so sniffing and the override are written there instead.
+ *
+ * Only the custom routing mode reads the switch from the configuration, and
+ * on 1.11 the switch only controls the destination override, never sniffing
+ * itself: a connection that is not sniffed carries no domain, so every
+ * domain/ruleset condition of the custom rules silently stops matching and
+ * the traffic is handed to the default outbound instead, which looks like
+ * "no internet" as soon as that outbound is not a proxy. The other modes have
+ * always forced global sniffing and are left untouched.
+ */
+if (routing_mode === 'custom') {
+	for (let inbound in config.inbounds) {
+		/* DNS is sniffed through the rule action below */
+		if (inbound.tag === 'dns-in')
+			continue;
+
+		inbound.sniff = true;
+		inbound.sniff_override_destination = (sniff_override === '1');
+	}
+}
+else {
+	push(config.route.rules, { action: 'sniff' });
+}
+
+/*
  * The DNS inbound is always sniffed so that queries can be hijacked below.
  */
-if (sniff_override === '1')
-	push(config.route.rules, { action: 'sniff' });
-else
-	push(config.route.rules, { inbound: 'dns-in', action: 'sniff' });
+push(config.route.rules, { inbound: 'dns-in', action: 'sniff' });
 
 /* The special dns outbound is replaced by the hijack-dns rule action */
 push(config.route.rules, { protocol: 'dns', action: 'hijack-dns' });
@@ -1146,24 +1113,13 @@ if (!isEmpty(main_node)) {
 			invert: (cfg.invert === '1') || null
 		};
 
-		/* `block` is a rule action instead of an outbound since sing-box 1.11.0 */
-		const action = get_route_action(outbound);
-		for (let k in keys(action))
-			rule[k] = action[k];
-
 		/*
-		 * Destination override fields of the direct outbound are route
-		 * options since sing-box 1.11.0.
+		 * `block` is a rule action since sing-box 1.11.0 and a rule action
+		 * only accepts a single outbound tag, multi outbound selections are
+		 * expanded into one rule per outbound by build_route_rules().
 		 */
-		if (action.action === 'route' && type(outbound) === 'string') {
-			const options = direct_overrides[outbound];
-			if (options) {
-				rule.override_address = options.override_address;
-				rule.override_port = options.override_port;
-			}
-		}
-
-		push(config.route.rules, rule);
+		for (let route_rule in build_route_rules(rule, outbound))
+			push(config.route.rules, route_rule);
 	});
 
 	const final_outbound = get_outbound(default_outbound);
@@ -1218,7 +1174,8 @@ if (routing_mode === 'custom') {
 		cache_file: {
 			enabled: true,
 			path: HP_DIR + '/cache.db',
-			store_dns: (cache_file_store_dns === '1') || null
+			/* `store_dns` is called `store_rdrc` in sing-box 1.11 */
+			store_rdrc: (cache_file_store_dns === '1') || null
 		}
 	};
 	/* Clash API */

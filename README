@@ -3,30 +3,76 @@ So this fork will not continue to provide support for new SB features in the fut
 Goodbye. everyone.
 
 For developers:
-Requires sing-box 1.14.0 or later (tested with 1.14.4).
+This is the sing-box 1.11 edition of luci-app-homeproxy.
+Requires sing-box 1.11.x (tested with 1.11.1). It does NOT work with
+sing-box 1.12.0 or later, and it is not an upgrade path for the 1.14 tree
+in ../luci-app-homeproxy-master-1.14.4 - use that one for sing-box 1.14.x.
 
-Migrated away from the legacy configuration format:
-- DNS servers use the new type based format (`udp` / `tcp` / `tls` / `https` / `quic` /
-  `h3` / `dhcp` / `local` / `fakeip`) instead of `address` strings.
-- `rcode://` DNS servers are replaced by the `predefined` DNS rule action.
-- The `block` and `dns` special outbounds are replaced by the `reject` and
-  `hijack-dns` route rule actions.
-- Inbound `sniff` / `sniff_override_destination` / `domain_strategy` are replaced
-  by the `sniff` and `resolve` route rule actions.
-- The outbound `domain_strategy`, and the DNS server `address_resolver` /
-  `address_strategy` option, are replaced by `domain_resolver`.
-- The direct outbound `override_address` / `override_port` fields are replaced by
-  `route-options`.
-- WireGuard is generated as an endpoint instead of an outbound.
-- Every dial field using a domain name needs a `domain_resolver`; `route.default_domain_resolver`
-  is set to the default DNS server as the fallback, and DNS servers dialing a domain name get
-  an explicit one.
-- The per DNS server `client_subnet` option is gone, `client_subnet` is only available globally
-  (DNS settings) and on DNS rules.
-- TUN `endpoint_independent_nat` is superseded by the UDP NAT fields
-  (`udp_mapping` / `udp_filtering`), and TUN `inet4_address` / `inet6_address`
-  are merged into `address`.
-- `experimental.cache_file.store_rdrc` is replaced by `store_dns`.
+Generated sing-box configuration uses the legacy (1.11 compatible) format:
+- DNS servers use the legacy `address` string format (`udp://`, `tcp://`,
+  `tls://`, `https://`, `quic://`, `h3://`, `dhcp://`, `local`,
+  `rcode://name_error`); the type based format is only available since 1.12.
+- DNS rules use `action: "route"` + `server` (the `predefined`, `evaluate`
+  and `match_response` actions only exist since 1.12/1.14). A `block-dns`
+  server (`rcode://name_error`) provides the blocked answer.
+- DNS response matching (`ip_cidr` / `ip_is_private`) was dropped by
+  sing-box 1.11, so those DNS rule fields are not generated any more, and
+  the DNS rule `outbound` field (a 1.14 domain resolver item) is ignored.
+  Use the outbound/DNS server domain strategy options instead.
+- A DNS rule that is left without any match condition is ignored (with a
+  warning in the service log) instead of being written out: sing-box 1.11
+  refuses to start with `parse dns rule[N]: missing conditions`. This
+  affects the pre-seeded `nodes_domain` rule of the default configuration,
+  which only carries an `outbound`; give it a domain or ruleset condition
+  if it should match, otherwise it has no effect on 1.11.
+- Outbound `domain_strategy` is used instead of `domain_resolver` and
+  `route.default_domain_resolver` (both only exist since 1.14).
+- TUN keeps `endpoint_independent_nat` instead of the 1.14 `udp_mapping` /
+  `udp_filtering` fields.
+- `experimental.cache_file.store_rdrc` is used instead of `store_dns`.
+- Inline ACME is written to the `acme` TLS field instead of
+  `certificate_provider`.
+- wireguard (endpoint), rule actions (`sniff`, `hijack-dns`, `route`,
+  `route-options`, `reject`) and the direct outbound `routing_mark` are
+  already 1.11 features and are kept as is. Because the rule action
+  `outbound` field accepts a single tag only, a routing rule with multiple
+  outbounds is expanded into one rule per outbound.
+- "Override destination" cannot be expressed by the `sniff` rule action on
+  1.11: its `override_destination` field only exists since 1.12 and is
+  rejected as an unknown field by 1.11. The deprecated inbound level fields
+  (`sniff` / `sniff_override_destination`) are still honoured by 1.11, so they
+  are written instead. In the custom routing mode sniffing is now always
+  enabled and the switch only controls the destination override: an
+  unsniffed connection carries no domain, so every domain/ruleset condition
+  of the custom rules stops matching and the traffic is silently handed to
+  the default outbound, which looks like "no internet" whenever that outbound
+  is not a proxy. Clearing the switch keeps the domain based routing and only
+  leaves the destination address untouched (the outbound receives the ip).
+  Only the custom routing mode reads the switch from the configuration (the
+  other modes have always forced global sniffing), so the behaviour of
+  bypass/gfwlist/tun is unchanged.
+- A selector never carries a `default` outbound which is not part of its own
+  outbound list, and a urltest never carries a `default` at all: sing-box
+  1.11 refuses both. When the configured default node is gone (removed by a
+  subscription update), filtered out, or not a member of the selected
+  subscription groups, the first outbound is used and a warning is logged.
+  The default outbound dropdown of a group based selector lists the nodes of
+  the selected subscription groups.
+
+Firewall:
+- Port 53 is no longer part of the default "common ports" list. DNS is
+  served by dnsmasq and the sing-box DNS inbound, transparently proxying
+  UDP/53 broke name resolution for the whole LAN in custom routing mode.
+  The nft rules also always return UDP/53 in the tproxy and tun paths, so
+  existing configurations which still list port 53 keep working.
+
+Upgrading:
+- LuCI serves the view JavaScript files from /www/luci-static/resources with
+  long lived caching, and the URL is not versioned. After installing a new
+  package, hard refresh the browser (Ctrl/Cmd + Shift + R, or clear the site
+  cache) before judging the UI. Otherwise the old node.js keeps running and
+  newly added fields (for example the "Default Outbound" row of a selector)
+  appear to be missing even though the installed file is correct.
 
 TODO:
 - Subscription page slow response with a large number of nodes
