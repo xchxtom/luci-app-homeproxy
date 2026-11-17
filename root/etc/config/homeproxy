@@ -1,7 +1,7 @@
 
 config homeproxy 'infra'
 	option __warning 'DO NOT EDIT THIS SECTION, OR YOU ARE ON YOUR OWN!'
-	option common_port '22,53,80,143,443,465,853,873,993,995,8080,8443,9418'
+	option common_port '22,80,143,443,465,853,873,993,995,8080,8443,9418'
 	option mixed_port '5330'
 	option redirect_port '5331'
 	option tproxy_port '5332'
@@ -25,6 +25,13 @@ config homeproxy 'config'
 	option routing_port 'common'
 	option proxy_mode 'redirect_tproxy'
 	option ipv6_support '1'
+	# Keep direct networks reachable when the main node is unreachable.
+	option failover '1'
+	option failover_interval '5'
+	option failover_threshold '3'
+	option failover_recover '2'
+	option failover_timeout '3'
+	option failover_probe_url 'http://www.gstatic.com/generate_204'
 
 config homeproxy 'experimental'
 	option clash_api_port '9090'

@@ -177,10 +177,12 @@ function parse_dnsquery(strquery) {
 
 /*
  * Check whether an outbound reference still points to an existing UCI node.
- * Built-in tags (direct-out / block-out) are always available.
+ * `direct-out` / `block-out` are built-in, `nil` / `same` are sentinels used
+ * by the main node options and never refer to a section - treat all of them
+ * as available so that they are not reported as missing.
  */
 function outbound_is_alive(tag) {
-	if (isEmpty(tag) || (tag in ['direct-out', 'block-out']))
+	if (isEmpty(tag) || (tag in ['direct-out', 'block-out', 'nil', 'same']))
 		return true;
 
 	return !isEmpty(uci.get_all(uciconfig, tag));
@@ -300,13 +302,22 @@ function generate_outbound(node, tag_override) {
 		/* Block is a rule action instead of an outbound since sing-box 1.11.0 */
 		if (length(outbounds) === 0)
 			push(outbounds, 'direct-out');
+
+		/* sing-box rejects a default outbound which is not part of the list */
+		let default_out = null;
+		if (!isEmpty(node.default_selected) && node.default_selected !== 'block-out' &&
+		    outbound_is_alive(node.default_selected)) {
+			const tag = get_tag(node.default_selected, 'cfg-' + node.default_selected + '-out');
+			if (tag in outbounds)
+				default_out = tag;
+		}
+
 		return {
 			type: node.type,
 			tag: tag_override || get_tag(node, 'cfg-' + node['.name'] + '-out'),
 			/* Selector */
 			outbounds: outbounds,
-			default: (outbound_is_alive(node.default_selected) && node.default_selected !== 'block-out') ?
-				(node.default_selected ? (get_tag(node.default_selected, 'cfg-' + node.default_selected + '-out')) : null) : null,
+			default: default_out,
 			/* URLTest */
 			url: node.test_url,
 			interval: node.interval,
@@ -1059,8 +1070,12 @@ while (length(groups_tobe_checkedout) > 0) {
 	const hashexp = regexp('^' + replace(replace(replace(sprintf("%J", newarr), /^\[(.*)\]$/g, "($1)"), /[" ]/g, ''), ',', '|') + '$', 'is');
 	uci.foreach(uciconfig, ucinode, (cfg) => {
 		if (!(cfg['.name'] in checkedout_nodes) && match(cfg?.grouphash, hashexp)) {
-			push(config.outbounds, generate_outbound(cfg));
 			push(checkedout_nodes, cfg['.name']);
+
+			/* generate_outbound() returns null for endpoints (e.g. WireGuard) */
+			const outbound = generate_outbound(cfg);
+			if (outbound)
+				push(config.outbounds, outbound);
 		}
 	});
 }

@@ -2845,3 +2845,35 @@ msgstr ""
 #: htdocs/luci-static/resources/view/homeproxy/client.js:1097
 msgid "yacd-meta"
 msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:317
+msgid "Direct fallback on node failure"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:317
+msgid "Keep direct networks reachable when the main node is unreachable. DNS hijack and transparent proxy rules are temporarily removed, and restored automatically once the node recovers."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:322
+msgid "Failover probe URL"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:322
+msgid "A plain HTTP URL used to check whether the proxy node is still usable."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:328
+msgid "Failover probe interval"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:328
+msgid "In seconds."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:335
+msgid "Failover trigger count"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:335
+msgid "Number of consecutive failed probes before falling back to direct connection."
+msgstr ""

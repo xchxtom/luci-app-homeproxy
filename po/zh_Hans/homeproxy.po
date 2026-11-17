@@ -2911,6 +2911,38 @@ msgstr "有效 uuid"
 msgid "yacd-meta"
 msgstr ""
 
+#: htdocs/luci-static/resources/view/homeproxy/client.js:317
+msgid "Direct fallback on node failure"
+msgstr "节点故障时自动降级为直连"
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:317
+msgid "Keep direct networks reachable when the main node is unreachable. DNS hijack and transparent proxy rules are temporarily removed, and restored automatically once the node recovers."
+msgstr "主节点不可用时保证直连网络仍可连接。此时会临时移除 DNS 劫持和透明代理规则，节点恢复后自动还原。"
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:322
+msgid "Failover probe URL"
+msgstr "故障检测地址"
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:322
+msgid "A plain HTTP URL used to check whether the proxy node is still usable."
+msgstr "用于检测代理节点是否可用的 HTTP 地址。"
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:328
+msgid "Failover probe interval"
+msgstr "故障检测间隔"
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:328
+msgid "In seconds."
+msgstr "单位：秒。"
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:335
+msgid "Failover trigger count"
+msgstr "故障判定次数"
+
+#: htdocs/luci-static/resources/view/homeproxy/client.js:335
+msgid "Number of consecutive failed probes before falling back to direct connection."
+msgstr "连续检测失败多少次后降级为直连。"
+
 #~ msgid "Update time"
 #~ msgstr "更新时间"
 

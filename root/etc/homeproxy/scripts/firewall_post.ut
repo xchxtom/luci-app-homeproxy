@@ -52,7 +52,12 @@ if (routing_mode !== 'custom') {
 
 let routing_port = uci.get(cfgname, 'config', 'routing_port') || 'common';
 if (routing_port === 'common')
-	routing_port = uci.get(cfgname, 'infra', 'common_port') || '22,53,80,143,443,465,587,853,873,993,995,8080,8443,9418';
+	/*
+	 * Port 53 (DNS) is intentionally not part of the common list: DNS is
+	 * handled by dnsmasq and the sing-box DNS inbound, transparently
+	 * proxying it breaks name resolution for the whole LAN.
+	 */
+	routing_port = uci.get(cfgname, 'infra', 'common_port') || '22,80,143,443,465,587,853,873,993,995,8080,8443,9418';
 
 const proxy_mode = uci.get(cfgname, 'config', 'proxy_mode') || 'redirect_tproxy',
       ipv6_support = uci.get(cfgname, 'config', 'ipv6_support') || '0';
@@ -354,6 +359,8 @@ chain homeproxy_mangle_tproxy {
 }
 
 chain homeproxy_mangle_tproxy_port {
+	{# Never tproxy DNS, it is served by dnsmasq / the sing-box DNS inbound -#}
+	udp dport 53 counter return
 	{% if (routing_port !== 'all'): %}
 	udp dport != @homeproxy_routing_port counter return
 	{% endif %}
@@ -361,6 +368,8 @@ chain homeproxy_mangle_tproxy_port {
 }
 
 chain homeproxy_mangle_mark {
+	{# Never tproxy DNS, it is served by dnsmasq / the sing-box DNS inbound -#}
+	udp dport 53 counter return
 	{% if (routing_port !== 'all'): %}
 	udp dport != @homeproxy_routing_port counter return
 	{% endif %}
@@ -546,6 +555,8 @@ chain homeproxy_mangle_lanac {
 }
 
 chain homeproxy_mangle_tun_mark {
+	{# Never route DNS into the tunnel, it is served by dnsmasq / sing-box DNS -#}
+	udp dport 53 counter return
 	{% if (routing_port !== 'all'): %}
 	{% if (proxy_mode === 'tun'): %}
 	tcp dport != @homeproxy_routing_port counter return
